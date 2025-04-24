@@ -10,6 +10,45 @@ This is the Shutter SDK for the Shutter Network. It is a TypeScript library that
 npm install @shutter-network/shutter-sdk
 ```
 
+## ⚠️ Asset Placement (Required for Browser Usage)
+
+If you're using this SDK in a browser environment (e.g., React, Next.js, etc), the SDK dynamically loads ```blst.js``` and ```blst.wasm``` files. You must make these files available to the browser by placing them in your public/static directory:
+
+```md
+my-app/
+├── public/
+│   ├── blst.js
+│   └── blst.wasm
+```
+Both these files are available in the sdk under ```src/crypto/blst```. Copy it from there.
+
+To avoid manually copying the blst.js and blst.wasm files, you can add a postinstall script in your project's package.json:
+
+```
+{
+  "scripts": {
+    "postinstall": "cp node_modules/@shutter-network/shutter-sdk/dist/blst.js public/blst.js && cp node_modules/@shutter-network/shutter-sdk/dist/blst.wasm public/blst.wasm"
+  }
+}
+```
+Run the following command to trigger the script:
+```npm install```
+
+### Vite-Specific Optimization issue
+If you're using Vite and encounter errors like:
+```bash
+The dependency might be incompatible with the dep optimizer. Try adding it to optimizeDeps.exclude.
+```
+You may need to exclude the SDK from optimization. Add this to your vite.config.ts:
+```
+export default defineConfig({
+  ...
+  optimizeDeps: {
+    exclude: ['@shutter-network/shutter-sdk'],
+  },
+});
+
+```
 ## Encryption
 
 ```ts
