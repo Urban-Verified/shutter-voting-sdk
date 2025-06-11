@@ -1,6 +1,6 @@
 {
   "name": "@shutter-network/shutter-sdk",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "TypeScript SDK for interacting with the Shutter crypto library, providing encryption, decryption, and utilities.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
