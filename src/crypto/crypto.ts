@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import { hexToBytes, keccak256, bytesToBigInt, bytesToHex, numberToBytes } from 'viem';
 import pkg from 'lodash';
 const { zip } = pkg;

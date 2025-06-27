@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "browser-or-node": "^3.0.0",
+    "buffer": "^6.0.3",
     "lodash": "^4.17.21",
     "viem": "^2.23.2"
   },
