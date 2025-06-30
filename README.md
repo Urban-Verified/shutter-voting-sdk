@@ -89,6 +89,13 @@ npm run test
 npm run build
 ```
 
+## Version History
+
+### 0.0.2
+- Improve instructions for better browser support 
+- Update documentation and fix some examples 
+- Fix browser compatibility by properly importing buffer as a dependency in browser environments 
+
 ## Support
 
 Feel free to open an issue on GitHub
