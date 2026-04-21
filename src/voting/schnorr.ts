@@ -1,0 +1,64 @@
+/**
+ * Single-point Schnorr signatures over G₁, used by the voter to bind her
+ * ballot to the ephemeral verification key vk = sk · P₁ registered with the
+ * Wahlregister-Server (Munich spec §5.2).
+ *
+ *   keygen:  sk ← Z_q,  vk := sk · P₁
+ *   sign:    k ← Z_q,  R := k · P₁,  e := H(R ‖ vk ‖ msg),  s := k + e·sk
+ *   verify:  e := H(R ‖ vk ‖ msg),   accept iff s · P₁ == R + e · vk
+ *
+ * Chosen over BLS per the Munich spec so verification stays in G₁ without a
+ * pairing. The `msg` parameter is the ballot preimage produced by
+ * `canonicalBallotMessage` (P6); for now the scheme is message-agnostic.
+ *
+ * The optional `sk` / `k` parameters exist for tests and interop with
+ * externally sampled randomness; production callers always omit them.
+ */
+
+import { G1Point } from '../crypto/curve';
+import { modQ, randomScalar } from '../crypto/field';
+import { DST_FIAT_SHAMIR, hashToScalar } from '../crypto/hash';
+import { SchnorrSig } from './types';
+
+const encoder = new TextEncoder();
+const DST_SCHNORR = encoder.encode('SHUTTER-VOTE-SCHNORR-v1');
+
+function challenge(R: G1Point, vk: G1Point, msg: Uint8Array): bigint {
+  return hashToScalar(DST_SCHNORR, R.toBytes(), vk.toBytes(), msg);
+}
+
+export function schnorrKeygen(sk: bigint = randomScalar()): {
+  sk: bigint;
+  vk: G1Point;
+} {
+  const reduced = modQ(sk);
+  const vk = G1Point.generator().mul(reduced);
+  return { sk: reduced, vk };
+}
+
+export function schnorrSign(
+  sk: bigint,
+  vk: G1Point,
+  msg: Uint8Array,
+  k: bigint = randomScalar(),
+): SchnorrSig {
+  const R = G1Point.generator().mul(k);
+  const e = challenge(R, vk, msg);
+  const s = modQ(k + e * modQ(sk));
+  return { R, s };
+}
+
+export function schnorrVerify(
+  vk: G1Point,
+  msg: Uint8Array,
+  sig: SchnorrSig,
+): boolean {
+  const e = challenge(sig.R, vk, msg);
+  const lhs = G1Point.generator().mul(sig.s);
+  const rhs = sig.R.add(vk.mul(e));
+  return lhs.equals(rhs);
+}
+
+// Re-export so the Fiat–Shamir DST is importable if callers want to mix it
+// into their own transcript construction.
+export { DST_FIAT_SHAMIR };

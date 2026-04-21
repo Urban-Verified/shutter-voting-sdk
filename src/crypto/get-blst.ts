@@ -1,5 +1,11 @@
 import { isBrowser, isNode } from "browser-or-node";
 
+declare global {
+    interface Window {
+        blst: any;
+    }
+}
+
 export let getBlst: () => Promise<any>;
 
 if (isBrowser) {
