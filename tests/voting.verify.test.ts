@@ -48,28 +48,93 @@ function buildBallot(args: {
   if (votes.length !== params.numCandidates) {
     throw new Error('buildBallot: votes.length mismatch');
   }
-  if (params.variant !== 'A') throw new Error('buildBallot: only Variant A');
 
   const { sk, vk } = schnorrKeygen();
 
-  const perCand = votes.map((v) => encrypt(v, mpk));
-  const cts = perCand.map((p) => p.ct);
-  const rs = perCand.map((p) => p.r);
+  // Produce the ciphertext wire and the per-ciphertext randomness. For
+  // Variant A this is one ct per candidate; for Variant B it's d cts per
+  // candidate in row-major (candidate, bit) order.
+  let cts: { c1: G2Point; c2: G2Point }[];
+  let rs: bigint[];
+  if (params.variant === 'A') {
+    const perCand = votes.map((v) => encrypt(v, mpk));
+    cts = perCand.map((p) => p.ct);
+    rs = perCand.map((p) => p.r);
+  } else {
+    const d = params.d!;
+    cts = [];
+    rs = [];
+    for (let j = 0; j < votes.length; j++) {
+      const v = votes[j]!;
+      if (v < 0n || v >= 1n << BigInt(d)) {
+        throw new Error(`buildBallot: vote ${v} out of range for d=${d}`);
+      }
+      for (let k = 0; k < d; k++) {
+        const bit = Number((v >> BigInt(k)) & 1n) as 0 | 1;
+        const { ct, r } = encrypt(BigInt(bit), mpk);
+        cts.push(ct);
+        rs.push(r);
+      }
+    }
+  }
 
   const t = seedBallotTranscript(electionId, mpk, vk, cts, params);
 
-  const candidates = rangeCandidates(params.budget);
-  const rangeOrBit = cts.map((ct, j) => {
-    t.append('ballot:range', u16BE(j));
-    return proveOR(
-      { ct, mpk, candidates },
-      { r: rs[j]!, trueIndex: Number(votes[j]!) },
-      t,
-    );
-  });
+  let rangeOrBit;
+  if (params.variant === 'A') {
+    const candidates = rangeCandidates(params.budget);
+    rangeOrBit = cts.map((ct, j) => {
+      t.append('ballot:range', u16BE(j));
+      return proveOR(
+        { ct, mpk, candidates },
+        { r: rs[j]!, trueIndex: Number(votes[j]!) },
+        t,
+      );
+    });
+  } else {
+    const d = params.d!;
+    rangeOrBit = [];
+    for (let jk = 0; jk < cts.length; jk++) {
+      const j = Math.floor(jk / d);
+      const k = jk % d;
+      const bit = Number((votes[j]! >> BigInt(k)) & 1n) as 0 | 1;
+      t.append('ballot:bit', u16BE(jk));
+      rangeOrBit.push(
+        proveOR(
+          { ct: cts[jk]!, mpk, candidates: [0n, 1n] },
+          { r: rs[jk]!, trueIndex: bit },
+          t,
+        ),
+      );
+    }
+  }
 
-  const ctSum = sumCts(cts);
-  const rSum = rs.reduce((a, r) => a + r, 0n);
+  // Build the aggregate ciphertext + aggregate randomness the budget proof
+  // runs against. Variant A: ctSum = Σ ct_j, rSum = Σ r_j. Variant B:
+  // ĉ = Σ_j Σ_k 2^k · ct_{j,k}, r̂ = Σ_j Σ_k 2^k · r_{j,k}.
+  let ctSum: { c1: G2Point; c2: G2Point };
+  let rSum: bigint;
+  if (params.variant === 'A') {
+    ctSum = sumCts(cts);
+    rSum = rs.reduce((a, r) => a + r, 0n);
+  } else {
+    const d = params.d!;
+    // weights per ciphertext index: 2^(jk mod d).
+    const weighted = cts.map((ct, i) => {
+      const k = i % d;
+      return { ct, r: rs[i]!, w: 1n << BigInt(k) };
+    });
+    ctSum = weighted
+      .map(({ ct, w }) => ({
+        c1: ct.c1.mul(w),
+        c2: ct.c2.mul(w),
+      }))
+      .reduce((acc, cur) => ({
+        c1: acc.c1.add(cur.c1),
+        c2: acc.c2.add(cur.c2),
+      }));
+    rSum = weighted.reduce((a, { r, w }) => a + r * w, 0n);
+  }
   const V = votes.reduce((a, b) => a + b, 0n);
   t.append('ballot:budget', new Uint8Array([0]));
   const budget =
@@ -83,7 +148,7 @@ function buildBallot(args: {
 
   const bvp: BallotValidityProof = {
     version: 0x01,
-    variant: 'A',
+    variant: params.variant,
     rangeOrBit,
     budget,
   };
@@ -381,7 +446,7 @@ describe('verifyBallot — structural rejections', () => {
     if (!r.ok) expect(r.reason).toMatch(/vk decode/);
   });
 
-  it('rejects Variant B explicitly (deferred to P4c)', () => {
+  it('rejects Variant B without d', () => {
     const { mpk } = trustedSetup();
     const { inputs } = buildBallot({
       mpk,
@@ -392,12 +457,12 @@ describe('verifyBallot — structural rejections', () => {
     });
     const r = verifyBallot(
       inputs,
-      { numCandidates: 3, budget: 1, mode: 'atMost', variant: 'B', d: 1 },
+      { numCandidates: 3, budget: 1, mode: 'atMost', variant: 'B' },
       mpk,
       accept,
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/Variant B/);
+    if (!r.ok) expect(r.reason).toMatch(/Variant B requires/);
   });
 
   it('rejects signature forged by a different sk', () => {
@@ -426,5 +491,122 @@ describe('verifyBallot — structural rejections', () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/signature/);
+  });
+});
+
+describe('verifyBallot — Variant B (binary decomposition)', () => {
+  const B = 3;
+  const d = 2; // 2^2 - 1 = 3 = B
+  const baseParams: BallotVerifyParams = {
+    numCandidates: 3,
+    budget: B,
+    mode: 'exact',
+    variant: 'B',
+    d,
+  };
+
+  it('honest ballot verifies (exact budget)', () => {
+    const { mpk } = trustedSetup();
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32).fill(0xa1),
+      pseudonym: new Uint8Array(32).fill(0xa2),
+      votes: [2n, 1n, 0n], // sum = 3 = B
+      params: baseParams,
+    });
+    expect(verifyBallot(inputs, baseParams, mpk, accept).ok).toBe(true);
+  });
+
+  it('honest ballot verifies (atMost budget)', () => {
+    const { mpk } = trustedSetup();
+    const params: BallotVerifyParams = { ...baseParams, mode: 'atMost' };
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32),
+      pseudonym: new Uint8Array(32),
+      votes: [1n, 1n, 0n], // sum = 2 < B
+      params,
+    });
+    expect(verifyBallot(inputs, params, mpk, accept).ok).toBe(true);
+  });
+
+  it('ciphertext count mismatch is flagged against ℓ·d', () => {
+    const { mpk } = trustedSetup();
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32),
+      pseudonym: new Uint8Array(32),
+      votes: [2n, 1n, 0n],
+      params: baseParams,
+    });
+    // ciphertexts has ℓ·d = 6; ask the verifier to expect a different d.
+    const r = verifyBallot(
+      inputs,
+      { ...baseParams, d: 3 },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/ciphertexts\.length/);
+  });
+
+  it('rejects a ballot with a tampered bit ciphertext', () => {
+    const { mpk } = trustedSetup();
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32),
+      pseudonym: new Uint8Array(32),
+      votes: [2n, 0n, 0n],
+      params: baseParams,
+    });
+    // Replace one bit ciphertext's C2 with an unrelated point.
+    const tamperedCts = inputs.ciphertexts.map(([c1, c2], i) =>
+      i === 0 ? ([c1, G2Point.generator().toBytes()] as [Uint8Array, Uint8Array]) : [c1, c2] as [Uint8Array, Uint8Array],
+    );
+    const r = verifyBallot(
+      { ...inputs, ciphertexts: tamperedCts },
+      baseParams,
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects when d is too small for the declared budget', () => {
+    const { mpk } = trustedSetup();
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32),
+      pseudonym: new Uint8Array(32),
+      votes: [0n, 0n, 0n],
+      params: baseParams,
+    });
+    const r = verifyBallot(
+      inputs,
+      { ...baseParams, budget: 7, d: 2 }, // needs d ≥ 3
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/2\^d/);
+  });
+
+  it('rejects a ballot when budget mode differs from the on-wire tag', () => {
+    const { mpk } = trustedSetup();
+    const { inputs } = buildBallot({
+      mpk,
+      electionId: new Uint8Array(32),
+      pseudonym: new Uint8Array(32),
+      votes: [2n, 1n, 0n],
+      params: baseParams, // exact
+    });
+    const r = verifyBallot(
+      inputs,
+      { ...baseParams, mode: 'atMost' },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/budget mode/);
   });
 });

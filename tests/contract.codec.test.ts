@@ -220,7 +220,7 @@ describe('encodeBallotValidityProof / decodeBallotValidityProof — Variant A', 
         budget: 1,
         d: 1,
       }),
-    ).toThrow(/Variant B not implemented/);
+    ).toThrow(/variant on wire/);
   });
 
   it('rejects n_outer mismatch', () => {
@@ -241,23 +241,129 @@ describe('encodeBallotValidityProof / decodeBallotValidityProof — Variant A', 
     ).toThrow(/n_outer/);
   });
 
-  it('Variant B encode/decode throws (deferred)', () => {
+});
+
+describe('encodeBallotValidityProof / decodeBallotValidityProof — Variant B', () => {
+  function freshBitProof(mpk: G2Point, bit: 0 | 1): ORProof {
+    const { ct, r } = encrypt(BigInt(bit), mpk);
+    return proveOR(
+      { ct, mpk, candidates: [0n, 1n] },
+      { r, trueIndex: bit },
+      new Transcript('C'),
+    );
+  }
+
+  it('round-trips a Variant B exact-budget ballot proof (ℓ=2, B=3, d=2)', () => {
     const { mpk } = trustedSetup();
+    const ℓ = 2;
+    const B = 3;
+    const d = 2;
+    // ℓ·d = 4 bit proofs. Bits encode v_0 = 2 (= 0b10) and v_1 = 1 (= 0b01).
+    const bits: (0 | 1)[] = [0, 1, 1, 0];
+    const rangeOrBit = bits.map((b) => freshBitProof(mpk, b));
     const bvp: BallotValidityProof = {
       version: 0x01,
       variant: 'B',
-      rangeOrBit: [],
+      rangeOrBit,
       budget: { mode: 'exact', proof: { e: 1n, z: 2n } },
     };
-    expect(() => encodeBallotValidityProof(bvp)).toThrow(/Variant B/);
+    const bytes = encodeBallotValidityProof(bvp);
+    const decoded = decodeBallotValidityProof(bytes, {
+      variant: 'B',
+      numCandidates: ℓ,
+      budget: B,
+      d,
+    });
+    expect(decoded.variant).toBe('B');
+    expect(decoded.rangeOrBit.length).toBe(ℓ * d);
+    for (let i = 0; i < ℓ * d; i++) {
+      expect(decoded.rangeOrBit[i]!.branches.length).toBe(2);
+      for (let j = 0; j < 2; j++) {
+        const a = decoded.rangeOrBit[i]!.branches[j]!;
+        const b = rangeOrBit[i]!.branches[j]!;
+        expect(a.a1.equals(b.a1)).toBe(true);
+        expect(a.a2.equals(b.a2)).toBe(true);
+        expect(a.e).toBe(b.e);
+        expect(a.z).toBe(b.z);
+      }
+    }
+    expect(decoded.budget.mode).toBe('exact');
+  });
+
+  it('round-trips a Variant B at-most-budget ballot proof', () => {
+    const { mpk } = trustedSetup();
+    const ℓ = 3;
+    const B = 3;
+    const d = 2;
+    const bits: (0 | 1)[] = [0, 0, 1, 0, 0, 1]; // v = [0, 1, 2] → sum = 3
+    const rangeOrBit = bits.map((b) => freshBitProof(mpk, b));
+    const atMostBranches = [0, 1, 2, 3].map((i) => ({
+      a1: G2Point.generator(),
+      a2: G2Point.generator(),
+      e: BigInt(i + 1),
+      z: BigInt(100 + i),
+    }));
+    const bvp: BallotValidityProof = {
+      version: 0x01,
+      variant: 'B',
+      rangeOrBit,
+      budget: { mode: 'atMost', proof: { branches: atMostBranches } },
+    };
+    const bytes = encodeBallotValidityProof(bvp);
+    const decoded = decodeBallotValidityProof(bytes, {
+      variant: 'B',
+      numCandidates: ℓ,
+      budget: B,
+      d,
+    });
+    expect(decoded.rangeOrBit.length).toBe(ℓ * d);
+    expect(decoded.budget.mode).toBe('atMost');
+    if (decoded.budget.mode === 'atMost') {
+      expect(decoded.budget.proof.branches.length).toBe(B + 1);
+    }
+  });
+
+  it('decode rejects Variant B without d', () => {
     expect(() =>
       decodeBallotValidityProof(new Uint8Array(4), {
         variant: 'B',
         numCandidates: 1,
         budget: 1,
-        d: 1,
       }),
-    ).toThrow(/Variant B/);
+    ).toThrow(/positive d/);
+  });
+
+  it('decode rejects Variant B with non-positive d', () => {
+    expect(() =>
+      decodeBallotValidityProof(new Uint8Array(4), {
+        variant: 'B',
+        numCandidates: 1,
+        budget: 1,
+        d: 0,
+      }),
+    ).toThrow(/positive d/);
+  });
+
+  it('decode rejects n_outer mismatch when params lie about d', () => {
+    const { mpk } = trustedSetup();
+    const ℓ = 2;
+    const d = 2;
+    const rangeOrBit = [0, 1, 0, 1].map((b) => freshBitProof(mpk, b as 0 | 1));
+    const bvp: BallotValidityProof = {
+      version: 0x01,
+      variant: 'B',
+      rangeOrBit,
+      budget: { mode: 'exact', proof: { e: 1n, z: 2n } },
+    };
+    const bytes = encodeBallotValidityProof(bvp);
+    expect(() =>
+      decodeBallotValidityProof(bytes, {
+        variant: 'B',
+        numCandidates: ℓ,
+        budget: 3,
+        d: d + 1, // wrong d on the decode side → n_outer mismatch
+      }),
+    ).toThrow(/n_outer/);
   });
 });
 

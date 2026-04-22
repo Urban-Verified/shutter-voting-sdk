@@ -26,7 +26,7 @@ import {
   decodeBallotValidityProof,
   decodeSchnorr,
 } from '../contract/codec';
-import { sumCts } from './encrypt';
+import { addCt, scalarMulCt, sumCts } from './encrypt';
 import {
   type ORStatement,
   verifyBudget,
@@ -214,19 +214,32 @@ export function verifyBallot(
   mpk: G2Point,
   verifyWRAttestation: WRAttestationVerifier,
 ): VerifyResult {
-  if (params.variant === 'B') {
-    return { ok: false, reason: 'Variant B not yet supported (P4c)' };
-  }
   if (params.numCandidates <= 0) {
     return { ok: false, reason: 'numCandidates must be positive' };
   }
   if (params.budget < 0) {
     return { ok: false, reason: 'budget must be non-negative' };
   }
-  if (inputs.ciphertexts.length !== params.numCandidates) {
+  if (params.variant === 'B') {
+    if (params.d === undefined || !Number.isInteger(params.d) || params.d <= 0) {
+      return { ok: false, reason: 'Variant B requires a positive integer d' };
+    }
+    const expectedMin = Math.ceil(Math.log2(params.budget + 1));
+    if (params.d < expectedMin) {
+      return {
+        ok: false,
+        reason: `Variant B d (${params.d}) must satisfy 2^d ≥ budget+1 (need d ≥ ${expectedMin})`,
+      };
+    }
+  }
+  const expectedCts =
+    params.variant === 'A'
+      ? params.numCandidates
+      : params.numCandidates * (params.d ?? 0);
+  if (inputs.ciphertexts.length !== expectedCts) {
     return {
       ok: false,
-      reason: `ciphertexts.length (${inputs.ciphertexts.length}) != numCandidates (${params.numCandidates})`,
+      reason: `ciphertexts.length (${inputs.ciphertexts.length}) != expected (${expectedCts})`,
     };
   }
 
@@ -286,21 +299,58 @@ export function verifyBallot(
   // Build the shared transcript and run every proof against it.
   const t = seedBallotTranscript(inputs.electionId, mpk, vk, cts, params);
 
-  const candidates = rangeCandidates(params.budget);
-  for (let j = 0; j < params.numCandidates; j++) {
-    t.append('ballot:range', u16BE(j));
-    const stmt: ORStatement = {
-      ct: cts[j]!,
-      mpk,
-      candidates,
-    };
-    if (!verifyOR(stmt, bvp.rangeOrBit[j]!, t)) {
-      return { ok: false, reason: `range proof ${j} failed` };
+  let ctSum: Ciphertext;
+  if (params.variant === 'A') {
+    // ℓ range proofs over {0, …, B}, one per candidate.
+    if (bvp.rangeOrBit.length !== params.numCandidates) {
+      return {
+        ok: false,
+        reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates (${params.numCandidates})`,
+      };
     }
+    const candidates = rangeCandidates(params.budget);
+    for (let j = 0; j < params.numCandidates; j++) {
+      t.append('ballot:range', u16BE(j));
+      const stmt: ORStatement = { ct: cts[j]!, mpk, candidates };
+      if (!verifyOR(stmt, bvp.rangeOrBit[j]!, t)) {
+        return { ok: false, reason: `range proof ${j} failed` };
+      }
+    }
+    ctSum = cts.length === 1 ? cts[0]! : sumCts(cts);
+  } else {
+    // Variant B: ℓ·d bit proofs over {0,1}. Caller reconstructs
+    //   ĉ_j = Σ_k 2^k · c_{j,k}  (Munich §6.2.2)
+    // and the budget proof runs on ĉ = Σ_j ĉ_j.
+    const d = params.d!;
+    const totalBits = params.numCandidates * d;
+    if (bvp.rangeOrBit.length !== totalBits) {
+      return {
+        ok: false,
+        reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates·d (${totalBits})`,
+      };
+    }
+    const bitCandidates: readonly bigint[] = [0n, 1n];
+    for (let jk = 0; jk < totalBits; jk++) {
+      t.append('ballot:bit', u16BE(jk));
+      const stmt: ORStatement = { ct: cts[jk]!, mpk, candidates: bitCandidates };
+      if (!verifyOR(stmt, bvp.rangeOrBit[jk]!, t)) {
+        return { ok: false, reason: `bit proof ${jk} failed` };
+      }
+    }
+    // Reconstruct each ĉ_j, then ĉ = Σ_j ĉ_j.
+    const cHats: Ciphertext[] = new Array(params.numCandidates);
+    for (let j = 0; j < params.numCandidates; j++) {
+      let acc: Ciphertext | null = null;
+      for (let k = 0; k < d; k++) {
+        const weighted = scalarMulCt(1n << BigInt(k), cts[j * d + k]!);
+        acc = acc === null ? weighted : addCt(acc, weighted);
+      }
+      cHats[j] = acc!;
+    }
+    ctSum = cHats.length === 1 ? cHats[0]! : sumCts(cHats);
   }
 
   t.append('ballot:budget', new Uint8Array([0]));
-  const ctSum = cts.length === 1 ? cts[0]! : sumCts(cts);
   if (
     !verifyBudget(
       { ctSum, mpk, budget: BigInt(params.budget) },

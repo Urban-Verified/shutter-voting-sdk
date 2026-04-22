@@ -7,17 +7,17 @@
  * (`Ballot`, `ElectionConfig`, `DecryptionShare`, …) is owned by the
  * consumer via their ABI layer (see D-5).
  *
- * Variant B and the (B+1)-OR at-most budget encoding are sketched at the
- * type level but not yet implemented — see TODO markers at the branch
- * points. Variant A with either exact or at-most budgets is complete.
+ * Variant A and Variant B share the same envelope — only `n_outer` and
+ * per-outer `branch_count` change.
  *
- * Wire layout (Variant A, budget = exact):
+ * Wire layout:
  *
  *   [0]       version      u8 (0x01)
- *   [1]       variant      u8 (0x41 'A')
- *   [2..3]    n_outer      u16 BE = ℓ
- *   [4..]     branch_count u16 BE per outer i, all equal to B+1
- *   [...]     or_proofs    n_outer × (B+1) × BRANCH_SIZE bytes,
+ *   [1]       variant      u8 (0x41 'A' / 0x42 'B')
+ *   [2..3]    n_outer      u16 BE      // Variant A: ℓ; Variant B: ℓ·d
+ *   [4..]     branch_count u16 BE per outer i
+ *                                      // Variant A: B+1; Variant B: 2
+ *   [...]     or_proofs    n_outer × branch_count × BRANCH_SIZE bytes,
  *                          each branch = a1(96) ‖ a2(96) ‖ e(32) ‖ z(32)
  *   [...]     budget_tag   u8 (0x00 exact, 0x01 atMost)
  *   [...]     budget       exact: 64 bytes DLEQ (e ‖ z); atMost: (B+1) branches as above
@@ -176,11 +176,6 @@ export function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array {
   if (p.variant !== 'A' && p.variant !== 'B') {
     throw new Error(`encodeBallotValidityProof: unknown variant ${p.variant}`);
   }
-  if (p.variant === 'B') {
-    // The encoder for Variant B is intentionally deferred to P4c. Callers
-    // should not be producing Variant B proofs yet.
-    throw new Error('encodeBallotValidityProof: Variant B not implemented yet');
-  }
 
   const nOuter = p.rangeOrBit.length;
   // Every outer proof must have the same branch count in the shipped
@@ -238,8 +233,8 @@ export function decodeBallotValidityProof(
   buf: Uint8Array,
   params: DecodeParams,
 ): BallotValidityProof {
-  if (params.variant === 'B') {
-    throw new Error('decodeBallotValidityProof: Variant B not implemented yet');
+  if (params.variant === 'B' && (params.d === undefined || params.d <= 0)) {
+    throw new Error('decodeBallotValidityProof: Variant B requires a positive d');
   }
 
   let offset = 0;
