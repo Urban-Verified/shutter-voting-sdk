@@ -12,6 +12,7 @@
   "scripts": {
     "test": "jest",
     "bench": "NODE_OPTIONS='--expose-gc' jest --config benchmarks/bench.config.js",
+    "gen-vectors": "ts-node scripts/gen-vectors.ts",
     "build": "tsup && cp src/crypto/blst/blst.wasm dist/blst.wasm"
   },
   "repository": {
@@ -28,6 +29,7 @@
     "fast-check": "^4.7.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
     "tsup": "^8.3.6",
     "typescript": "^5.7.3"
   },
