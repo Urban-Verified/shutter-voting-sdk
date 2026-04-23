@@ -4,7 +4,7 @@ TypeScript SDK for client-side encrypted voting on the Shutter Network. Implemen
 
 Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/shutter-sdk); shares the BLST WASM layer.
 
-> **Status.** Early development — API not yet stable. This README describes the full intended surface of the SDK; not every function below is implemented in every release. See [docs/development-plan.md](docs/development-plan.md) for the current phase breakdown.
+> **Status.** Pre-1.0; API is stabilising but not frozen. Phases P0–P9 of [docs/development-plan.md](docs/development-plan.md) are implemented: curve layer, ElGamal + Schnorr, Fiat–Shamir transcript, DLEQ / OR / budget proofs (both variants), ballot verification, partial-decrypt + BSGS tally, wire codecs, benchmarks, and committed cross-impl test vectors.
 
 ---
 
@@ -412,6 +412,12 @@ function combineShares(
 // Baby-step-giant-step in G₂: find T such that τ = T · P₂.
 // Runtime & memory O(√upperBound). Munich-scale: ~10^5 upper bound → sub-second.
 function recoverDiscreteLog(tau: G2Point, upperBound: bigint): bigint;
+
+// Hoist the baby-step table when recovering many plaintexts against the
+// same bound (the Tally Aggregator's hot path: one table, ℓ candidates).
+interface BabyStepTable { /* opaque; reuse as-is */ }
+function buildBabyStepTable(upperBound: bigint): BabyStepTable;
+function recoverDiscreteLogWithTable(tau: G2Point, table: BabyStepTable): bigint;
 ```
 
 ---
@@ -425,7 +431,7 @@ Two range-proof shapes are supported, picked at election-config time:
 | **A**   | `(B+1)`-branch OR over {0,…,B} | `B+1`    | `ℓ · (B+1)` OR branches | Small budgets `B` (Munich default).                           |
 | **B**   | `d` bit-proofs over {0,1}, where `d = ⌈log2(B+1)⌉` | `2`      | `ℓ · d` OR branches   | Large budgets where `(B+1) > d`, i.e. `B ≥ 3` or so.          |
 
-Variant B is declared in the type surface today; the prover / verifier / codec for it ship in a later phase (P4c). Calling Variant B paths before then throws an explicit `"Variant B not implemented"` error rather than failing silently.
+Both variants are fully wired end-to-end — prover, verifier, codec, and benchmarks. `seedBallotTranscript` binds `variant` and (for B) `d` into the transcript so an A-ballot cannot be re-interpreted as a B-ballot at the same parameters.
 
 ---
 
@@ -443,11 +449,15 @@ Variant B is declared in the type surface today; the prover / verifier / codec f
 ## Testing & building
 
 ```bash
-npm test        # jest
-npm run build   # tsup + copies blst.wasm into dist/
+npm test              # jest — unit, property-based, end-to-end, + vector re-verify
+npm run bench         # jest w/ --expose-gc over benchmarks/*.bench.ts
+npm run gen-vectors   # regenerate tests/vectors/**/*.json deterministically
+npm run build         # tsup + copies blst.wasm into dist/
 ```
 
-Benchmarks (proof gen / verify timings, proof sizes per variant) live in `benchmarks/`.
+**Benchmarks** under [`benchmarks/`](benchmarks/): `primitives.bench.ts`, `ballot-variant-{a,b}.bench.ts`, `decrypt.bench.ts`, `e2e.bench.ts`. The full-scale HL_ARC `p=100` e2e is marked `describe.skip` pending a blst WASM rebuild with `ALLOW_MEMORY_GROWTH` (see inline comment in [benchmarks/e2e.bench.ts](benchmarks/e2e.bench.ts)).
+
+**Cross-impl test vectors** under [`tests/vectors/`](tests/vectors/): JSON per primitive (encrypt, DLEQ, OR, budget, Schnorr, decrypt-share, ballot, tally), consumed by `tests/voting.vectors.test.ts` and intended for an independent re-verifier in another language. Schema in [tests/vectors/_schema.ts](tests/vectors/_schema.ts); generator in [scripts/gen-vectors.ts](scripts/gen-vectors.ts).
 
 ---
 
