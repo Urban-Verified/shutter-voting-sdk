@@ -10,19 +10,21 @@ import {
   Transcript,
   encrypt,
   initCurves,
-  proveDLEQ,
   proveOR,
   proveBudgetAtMost,
   proveBudgetExact,
-  randomScalar,
   schnorrKeygen,
   schnorrSign,
   schnorrVerify,
   sumCts,
+} from '../src';
+import { randomScalar } from '../src/crypto/field';
+import {
+  proveDLEQ,
   verifyDLEQ,
   verifyOR,
   verifyBudget,
-} from '../src';
+} from '../src/voting/proofs';
 import { bench } from './lib/timer';
 
 beforeAll(async () => {

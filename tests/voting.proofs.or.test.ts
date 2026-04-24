@@ -1,14 +1,12 @@
 import {
   G2Point,
-  Q,
   Transcript,
   encrypt,
   initCurves,
-  modQ,
   proveOR,
-  randomScalar,
-  verifyOR,
 } from '../src';
+import { Q, modQ, randomScalar } from '../src/crypto/field';
+import { verifyOR } from '../src/voting/proofs';
 
 beforeAll(async () => {
   await initCurves();

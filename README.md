@@ -15,12 +15,11 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
 - [Asset placement (browser)](#asset-placement-browser)
 - [High-level flow](#high-level-flow)
 - [API surface](#api-surface)
-  - [Curve & scalar primitives](#curve--scalar-primitives)
-  - [Hash-to-scalar / hash-to-curve](#hash-to-scalar--hash-to-curve)
+  - [Curve primitives](#curve-primitives)
   - [Fiat–Shamir transcript](#fiatshamir-transcript)
   - [ElGamal encryption & homomorphic ops](#elgamal-encryption--homomorphic-ops)
   - [Schnorr signatures](#schnorr-signatures)
-  - [Zero-knowledge proofs](#zero-knowledge-proofs)
+  - [Zero-knowledge proof constructors](#zero-knowledge-proof-constructors)
   - [Ballot validity proofs](#ballot-validity-proofs)
   - [Ballot-level verification](#ballot-level-verification)
   - [Wire codecs](#wire-codecs)
@@ -40,16 +39,16 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
 - ElGamal encryption in G₂ on BLS12-381, with homomorphic addition, scalar multiplication, and a canonical sum.
 - Schnorr signatures in G₁ for voter-to-ballot binding.
 - A Fiat–Shamir `Transcript` type with Merlin-style challenge fold-back.
-- Zero-knowledge proofs: Chaum–Pedersen DLEQ, OR-composition, exact-budget, at-most-budget, ballot validity.
-- Ballot-level verification (`verifyBallot`) that composes all of the above.
-- Wire codecs for the opaque `bytes` fields the on-chain contract leaves unspecified: `zkProof`, Schnorr signature, decryption-share DLEQ.
+- Zero-knowledge proof **constructors** for voters — OR-composition (range / bit) and budget (exact / at-most) — plus a single `verifyBallot` entry point that composes every matching verifier for Vote Proxy and auditor roles.
+- Wire encoders for the opaque `bytes` fields the on-chain contract leaves unspecified (`zkProof`, Schnorr signature, decryption-share DLEQ), and a matching `decodeDLEQ` for tally / auditor roles that consume on-chain decryption shares.
 - **One** keyper primitive — `partialDecrypt` — plus share verification, Lagrange combination, and baby-step-giant-step (BSGS) discrete-log recovery for the final tally.
 
 **Out of scope**
 
 - Distributed key generation (DKG), keyper key storage, keyper networking/orchestration.
 - Contract-struct types or any ABI layer — the consumer owns their `Ballot` / `ElectionConfig` / `DecryptionShare` shapes and destructures them into the primitive-typed inputs the SDK expects.
-- `Voter` / `Keyper` classes or service wrappers. The SDK exposes plain functions; callers compose what they need.
+- `Voter` / `Keyper` classes or service wrappers. The SDK exposes plain ballot-construction and verification functions; callers compose what they need.
+- Scalar / field arithmetic, hash-to-scalar, and bare Chaum–Pedersen DLEQ primitives. These are implementation details of `encrypt` / `proveOR` / `partialDecrypt` / `verifyBallot`; the SDK is organised around ballot and proof *operations*, not their scalar building blocks.
 - WR-Server attestation verification — you inject a `WRAttestationVerifier` closure into `verifyBallot`.
 
 ---
@@ -111,7 +110,9 @@ All exports below come from the package root:
 import { /* … */ } from '@shutter-network/shutter-voting-sdk';
 ```
 
-### Curve & scalar primitives
+### Curve primitives
+
+Typed G₁ / G₂ wrappers around BLS12-381. Subgroup checks run on every `fromBytes` so downstream code can trust any point it holds. Scalars pass through the API as plain `bigint`s — scalar arithmetic, hash-to-scalar, and domain-separation are handled internally by `encrypt`, `proveOR`, `partialDecrypt`, and the other operations below.
 
 ```ts
 class G1Point {
@@ -134,32 +135,6 @@ class G2Point {
 
 const G1_BYTES = 48;
 const G2_BYTES = 96;
-
-// Scalar field Z_Q (Q = BLS12-381 group order).
-const Q: bigint;
-const SCALAR_BYTES = 32;
-
-function randomScalar(): bigint;            // uniform in [0, Q)
-function modQ(x: bigint): bigint;           // reduce into [0, Q)
-function wideReduce(wide: Uint8Array): bigint; // reduce a ≥48-byte buffer
-function scalarInv(x: bigint): bigint;      // x^(-1) mod Q
-
-function bytesToBigIntBE(b: Uint8Array): bigint;
-function bigIntToBytesBE(x: bigint, size: number): Uint8Array;
-function scalarToBytes(x: bigint): Uint8Array;   // 32-byte BE
-function scalarFromBytes(b: Uint8Array): bigint; // rejects ≥ Q
-```
-
-### Hash-to-scalar / hash-to-curve
-
-Domain-separated hashing used by every Fiat–Shamir challenge and every hash-to-curve path.
-
-```ts
-function hashToScalar(dst: Uint8Array, ...msgs: Uint8Array[]): bigint;
-
-const DST_FIAT_SHAMIR: Uint8Array;
-const DST_HASH_TO_CURVE_G1: Uint8Array;
-const DST_HASH_TO_CURVE_G2: Uint8Array;
 ```
 
 ### Fiat–Shamir transcript
@@ -217,31 +192,22 @@ function schnorrVerify(vk: G1Point, msg: Uint8Array, sig: SchnorrSig): boolean;
 
 The signed `msg` is the `keccak256` of the bytes returned by [`canonicalBallotMessage`](#ballot-level-verification) — don't assemble the preimage by hand.
 
-### Zero-knowledge proofs
+### Zero-knowledge proof constructors
 
-All proofs share one transcript pattern: build a `Transcript`, append public inputs, pass it to the prover / verifier, and the same transcript is re-used for downstream proofs. Proofs are deterministic given injected commitment randomness (see the optional `commit` params), which keeps test vectors and fuzzing tractable.
+Voter-side prover functions. Every prover seeds a shared `Transcript` with public inputs; the same transcript is re-used across the per-candidate range / bit proofs and the aggregate budget proof so they compose into a single `BallotValidityProof`. Proofs are deterministic given injected commitment randomness (see the optional `commit` params), which keeps test vectors and fuzzing tractable.
+
+Verifier-side roles (Vote Proxy, auditor) do **not** invoke these per-proof — they call [`verifyBallot`](#ballot-level-verification), which re-seeds the transcript the same way and runs every sub-proof in one pass. Keyper decryption shares are verified via [`verifyDecryptionShare`](#keyper-partial-decryption).
 
 ```ts
 interface DLEQProof  { e: bigint; z: bigint; }
-interface ORProofBranch { a1: G2Point; a2: G2Point; e: bigint; z: bigint; }
-interface ORProof    { branches: ORProofBranch[]; }
+interface ORProof    { branches: { a1: G2Point; a2: G2Point; e: bigint; z: bigint; }[]; }
 
 type BudgetProof =
   | { mode: 'exact'; proof: DLEQProof }
   | { mode: 'atMost'; proof: ORProof };
 ```
 
-**Chaum–Pedersen DLEQ** — proves `logBase1(point1) == logBase2(point2)` without revealing the discrete log.
-
-```ts
-interface DLEQStatement { base1: G2Point; point1: G2Point; base2: G2Point; point2: G2Point; }
-interface DLEQWitness   { x: bigint; }
-
-function proveDLEQ(stmt: DLEQStatement, witness: DLEQWitness, t: Transcript, commit?: { w?: bigint }): DLEQProof;
-function verifyDLEQ(stmt: DLEQStatement, proof: DLEQProof, t: Transcript): boolean;
-```
-
-**OR composition** — proves a ciphertext `(C1, C2)` encrypts *one* of a fixed candidate set without revealing which.
+**OR composition** — proves a ciphertext `(C1, C2)` encrypts *one* of a fixed candidate set without revealing which. Used for both Variant A range proofs (candidate set `{0,…,B}`) and Variant B bit proofs (candidate set `{0,1}`).
 
 ```ts
 interface ORStatement { ct: Ciphertext; mpk: G2Point; candidates: readonly bigint[]; }
@@ -249,10 +215,9 @@ interface ORWitness   { r: bigint; trueIndex: number; }
 interface ORCommitments { w?: bigint; simulated?: ReadonlyArray<{ e: bigint; z: bigint } | undefined>; }
 
 function proveOR(stmt: ORStatement, witness: ORWitness, t: Transcript, commit?: ORCommitments): ORProof;
-function verifyOR(stmt: ORStatement, proof: ORProof, t: Transcript): boolean;
 ```
 
-**Budget proofs** — two wrappers over DLEQ / OR that bind the aggregate ciphertext `cΣ = Σ_j c_j` to a budget `B`. The mode byte is bound into the transcript, so an `exact` proof cannot be reinterpreted as an `atMost` proof even when `V = B`.
+**Budget proofs** — bind the aggregate ciphertext `cΣ = Σ_j c_j` to a budget `B`. The mode byte is bound into the transcript, so an `exact` proof cannot be reinterpreted as an `atMost` proof even when `V = B`.
 
 ```ts
 interface BudgetStatement    { ctSum: Ciphertext; mpk: G2Point; budget: bigint; }
@@ -261,10 +226,6 @@ interface AtMostBudgetWitness { rSum: bigint; V: bigint; }
 
 function proveBudgetExact (stmt: BudgetStatement, w: ExactBudgetWitness,  t: Transcript, commit?: { w?: bigint }): BudgetProof;
 function proveBudgetAtMost(stmt: BudgetStatement, w: AtMostBudgetWitness, t: Transcript, commit?: ORCommitments): BudgetProof;
-
-function verifyBudgetExact (stmt: BudgetStatement, proof: BudgetProof, t: Transcript): boolean;
-function verifyBudgetAtMost(stmt: BudgetStatement, proof: BudgetProof, t: Transcript): boolean;
-function verifyBudget      (stmt: BudgetStatement, proof: BudgetProof, t: Transcript): boolean; // dispatch on proof.mode
 ```
 
 ### Ballot validity proofs
@@ -347,30 +308,16 @@ Destructure your own `Ballot` struct (from your ABI / contract layer) into `Ball
 
 ### Wire codecs
 
-The only SDK-owned serialisation surface — the `bytes` fields the on-chain contract leaves opaque.
+The `bytes` fields the on-chain contract leaves opaque. Voters, keypers, and any other producer role encode once on the way onto the wire; `verifyBallot` handles every ballot-side decode internally, so the only decoder the public surface exposes is `decodeDLEQ` — needed by the Tally Aggregator and auditors to consume keyper decryption-share proofs that they did not themselves construct.
 
 ```ts
-const BVP_VERSION: 0x01;
-const SCHNORR_BYTES: 80;
-
-interface DecodeParams {
-  variant: 'A' | 'B';
-  numCandidates: number;
-  budget: number;
-  d?: number; // Variant B only
-}
-
 function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array;
-function decodeBallotValidityProof(buf: Uint8Array, params: DecodeParams): BallotValidityProof;
 
-function encodeDLEQ(p: DLEQProof): Uint8Array;              // 64 bytes: 32-BE e ‖ 32-BE z
-function decodeDLEQ(b: Uint8Array): DLEQProof;
+function encodeDLEQ(p: DLEQProof): Uint8Array; // 64 bytes: 32-BE e ‖ 32-BE z
+function decodeDLEQ(b: Uint8Array): DLEQProof; // strict: wrong length throws
 
-function encodeSchnorr(sig: SchnorrSig): Uint8Array;         // 80 bytes: 48-byte R ‖ 32-BE s
-function decodeSchnorr(b: Uint8Array): SchnorrSig;
+function encodeSchnorr(sig: SchnorrSig): Uint8Array; // 80 bytes: 48-byte R ‖ 32-BE s
 ```
-
-Decoders are strict: wrong version, wrong length, trailing bytes, or mismatched `(numCandidates, budget, variant)` all throw.
 
 ### Keyper partial decryption
 

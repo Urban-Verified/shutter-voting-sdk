@@ -3,6 +3,9 @@ import {
   G2Point,
   G1_BYTES,
   G2_BYTES,
+  initCurves,
+} from '../src';
+import {
   Q,
   SCALAR_BYTES,
   bytesToBigIntBE,
@@ -13,10 +16,8 @@ import {
   scalarToBytes,
   scalarFromBytes,
   scalarInv,
-  initCurves,
-  hashToScalar,
-  DST_FIAT_SHAMIR,
-} from '../src';
+} from '../src/crypto/field';
+import { hashToScalar, DST_FIAT_SHAMIR } from '../src/crypto/hash';
 
 beforeAll(async () => {
   await initCurves();

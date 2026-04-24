@@ -5,9 +5,7 @@ import {
   G2Point,
   ORProof,
   Transcript,
-  decodeBallotValidityProof,
   decodeDLEQ,
-  decodeSchnorr,
   encodeBallotValidityProof,
   encodeDLEQ,
   encodeSchnorr,
@@ -16,11 +14,15 @@ import {
   proveBudgetAtMost,
   proveBudgetExact,
   proveOR,
-  randomScalar,
   schnorrKeygen,
   schnorrSign,
   sumCts,
 } from '../src';
+import { randomScalar } from '../src/crypto/field';
+import {
+  decodeBallotValidityProof,
+  decodeSchnorr,
+} from '../src/contract/codec';
 
 beforeAll(async () => {
   await initCurves();

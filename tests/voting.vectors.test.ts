@@ -14,17 +14,19 @@ import {
   Transcript,
   buildBabyStepTable,
   combineShares,
-  decodeSchnorr,
   encrypt,
   initCurves,
   recoverDiscreteLogWithTable,
   schnorrVerify,
   verifyBallot,
+  verifyDecryptionShare,
+} from '../src';
+import { decodeSchnorr } from '../src/contract/codec';
+import {
   verifyBudget,
   verifyDLEQ,
-  verifyDecryptionShare,
   verifyOR,
-} from '../src';
+} from '../src/voting/proofs';
 import {
   BallotVector,
   BudgetVector,

@@ -18,10 +18,10 @@ import {
   encrypt,
   initCurves,
   proveOR,
-  randomScalar,
   verifyBallot,
-  verifyOR,
 } from '../src';
+import { randomScalar } from '../src/crypto/field';
+import { verifyOR } from '../src/voting/proofs';
 import { buildBallot } from '../benchmarks/lib/ballot';
 
 beforeAll(async () => {

@@ -117,6 +117,16 @@ export function canonicalBallotMessage(args: {
   ciphertexts: ReadonlyArray<readonly [Uint8Array, Uint8Array]>;
   zkProof: Uint8Array;
 }): Uint8Array {
+  if (args.electionId.length !== 32) {
+    throw new Error(
+      `canonicalBallotMessage: electionId must be exactly 32 bytes (got ${args.electionId.length})`,
+    );
+  }
+  if (args.pseudonym.length !== 32) {
+    throw new Error(
+      `canonicalBallotMessage: pseudonym must be exactly 32 bytes (got ${args.pseudonym.length})`,
+    );
+  }
   for (const [c1, c2] of args.ciphertexts) {
     if (c1.length !== 96 || c2.length !== 96) {
       throw new Error('canonicalBallotMessage: each ciphertext component must be 96 bytes');
@@ -214,23 +224,55 @@ export function verifyBallot(
   mpk: G2Point,
   verifyWRAttestation: WRAttestationVerifier,
 ): VerifyResult {
-  if (params.numCandidates <= 0) {
-    return { ok: false, reason: 'numCandidates must be positive' };
+  // Parameter validation. The codec serialises ℓ and B as u16BE, so 0xFFFF
+  // is the natural hard ceiling. Anything larger could not round-trip the
+  // wire anyway; bounding here turns oversized params into a clean
+  // VerifyResult instead of an allocation blow-up on rangeCandidates()/
+  // ciphertext loops.
+  if (!Number.isInteger(params.numCandidates)) {
+    return { ok: false, reason: 'numCandidates must be an integer' };
   }
-  if (params.budget < 0) {
-    return { ok: false, reason: 'budget must be non-negative' };
+  if (params.numCandidates < 1 || params.numCandidates > 0xffff) {
+    return { ok: false, reason: `numCandidates (${params.numCandidates}) out of range [1, 65535]` };
+  }
+  if (!Number.isInteger(params.budget)) {
+    return { ok: false, reason: 'budget must be an integer' };
+  }
+  // Munich spec requires B ≥ 1; "budget 0" would collapse the ballot to
+  // all-zero votes and reduce the budget proof to proving a tautology.
+  if (params.budget < 1 || params.budget > 0xffff) {
+    return { ok: false, reason: `budget (${params.budget}) out of range [1, 65535]` };
+  }
+  if (params.mode !== 'exact' && params.mode !== 'atMost') {
+    return { ok: false, reason: `unknown mode: ${params.mode}` };
+  }
+  if (params.variant !== 'A' && params.variant !== 'B') {
+    return { ok: false, reason: `unknown variant: ${params.variant}` };
   }
   if (params.variant === 'B') {
     if (params.d === undefined || !Number.isInteger(params.d) || params.d <= 0) {
       return { ok: false, reason: 'Variant B requires a positive integer d' };
     }
-    const expectedMin = Math.ceil(Math.log2(params.budget + 1));
-    if (params.d < expectedMin) {
+    // Spec: d = ⌈log₂(B+1)⌉ (Potential Extensions §binary decomposition).
+    // Enforce exactly — accepting d > ⌈log₂(B+1)⌉ would silently admit
+    // padded bit-decompositions with proof-size attack surface for no
+    // cryptographic gain.
+    const expectedD = Math.ceil(Math.log2(params.budget + 1));
+    if (params.d !== expectedD) {
       return {
         ok: false,
-        reason: `Variant B d (${params.d}) must satisfy 2^d ≥ budget+1 (need d ≥ ${expectedMin})`,
+        reason: `Variant B d (${params.d}) must equal ⌈log₂(B+1)⌉ = ${expectedD}`,
       };
     }
+  }
+  if (inputs.electionId.length !== 32) {
+    return { ok: false, reason: `electionId must be 32 bytes (got ${inputs.electionId.length})` };
+  }
+  if (inputs.pseudonym.length !== 32) {
+    return { ok: false, reason: `pseudonym must be 32 bytes (got ${inputs.pseudonym.length})` };
+  }
+  if (mpk.isIdentity()) {
+    return { ok: false, reason: 'mpk is the identity — rejected (would collapse ciphertext privacy)' };
   }
   const expectedCts =
     params.variant === 'A'
@@ -249,6 +291,12 @@ export function verifyBallot(
     vk = G1Point.fromBytes(inputs.vk);
   } catch (e) {
     return { ok: false, reason: `vk decode: ${(e as Error).message}` };
+  }
+  if (vk.isIdentity()) {
+    // sk=0 would make `s·P₁ == R + e·O = R` — every signature trivially
+    // verifies. The spec defines vk := sk·P₁ for random sk; WR-Server
+    // registration should reject identity, but we guard here too.
+    return { ok: false, reason: 'vk is the identity — rejected (sk=0 breaks signature soundness)' };
   }
 
   // Decode every (C1, C2). Each G2Point.fromBytes runs a subgroup check.

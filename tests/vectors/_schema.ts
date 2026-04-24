@@ -16,11 +16,11 @@ import {
   G2Point,
   ORProof,
   SchnorrSig,
-  decodeBallotValidityProof,
   decodeDLEQ,
   encodeBallotValidityProof,
   encodeDLEQ,
 } from '../../src';
+import { decodeBallotValidityProof } from '../../src/contract/codec';
 
 export const VECTOR_VERSION = 1;
 

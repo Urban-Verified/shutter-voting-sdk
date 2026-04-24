@@ -126,6 +126,25 @@ Decision: `src/contract/types.ts` is removed from the plan before implementation
 
 Upstream ships BLST under `src/crypto/blst/`, not `src/blst/`. We kept the upstream layout (verbatim `git clone`) rather than moving the tree. §4.1 is updated to reflect `src/crypto/blst/` containing `blst.js`, `blst.wasm`, plus the hand-written `types.ts` re-exports. Also added `src/crypto/init.ts` (WASM runtime init + ready-gate — upstream had this inline; factoring it out lets tests await it once).
 
+### D-6. Public surface is the actor-facing operations only
+
+§5 of this plan describes the internal module layout — what lives inside `src/crypto/`, `src/voting/`, and `src/contract/`. The *public* surface (what `src/index.ts` exports under `@shutter-network/shutter-voting-sdk`) is narrower: it is exactly the set of operations the five actor roles (voter, Vote Proxy / Vote Registry, Tally Aggregator, auditor, keyper) need to carry out their step of the protocol.
+
+Concretely, the package-root exports are:
+
+- **Curve + WASM boot:** `initCurves`, `G1Point`, `G2Point`, `G1_BYTES`, `G2_BYTES`.
+- **ElGamal:** `encrypt`, `addCt`, `scalarMulCt`, `sumCts`, and the `Ciphertext` type.
+- **Fiat–Shamir:** the `Transcript` class.
+- **Schnorr:** `schnorrKeygen`, `schnorrSign`, `schnorrVerify`, `SchnorrSig`.
+- **Voter-side proof constructors:** `proveOR`, `proveBudgetExact`, `proveBudgetAtMost`, their statement/witness/commitment argument types, and the `ORProof` / `DLEQProof` / `BudgetProof` / `BallotValidityProof` types.
+- **Ballot verification (Vote Proxy / auditor):** `verifyBallot`, `canonicalBallotMessage`, `seedBallotTranscript`, `rangeCandidates`, and the `BallotInputs` / `BallotVerifyParams` / `VerifyResult` / `WRAttestationVerifier` types.
+- **Decrypt side (keyper / tally / auditor):** `partialDecrypt`, `verifyDecryptionShare`, `combineShares`, `recoverDiscreteLog`, `buildBabyStepTable`, `recoverDiscreteLogWithTable`, `BabyStepTable`, `PartialDecryption`.
+- **Wire codecs:** `encodeBallotValidityProof`, `encodeDLEQ`, `decodeDLEQ`, `encodeSchnorr`.
+
+What §5.1 and §5.2 describe as building blocks — scalar helpers (`randomScalar`, `modQ`, `scalarInv`, `Q`, `SCALAR_BYTES`, `bytesToBigIntBE`, `bigIntToBytesBE`, `wideReduce`, `scalarToBytes`, `scalarFromBytes`), hash primitives (`hashToScalar`, the `DST_*` constants), bare `proveDLEQ` / `verifyDLEQ` / `verifyOR` / `verifyBudget*`, and ballot-side decoders (`decodeBallotValidityProof`, `decodeSchnorr`) — are internals of the kept operations. They are reachable via subpath imports (`src/crypto/field`, `src/voting/proofs`, `src/contract/codec`) for tests, benchmarks, and the cross-impl vector generator, which need them for determinism and white-box assertions. Package consumers do not: `encrypt` seeds its own randomness and transcripts; `proveOR` and the budget provers own the DLEQ / OR composition; `verifyBallot` owns every ballot-side decode and sub-verifier; `partialDecrypt` and `verifyDecryptionShare` own the share-side DLEQ. Exposing the building blocks at the package root would invite consumers to roll their own protocol against the Munich spec, which is a cryptographic-review hazard and not something the SDK is meant to enable.
+
+This matches Principle #2 ("SDK exposes functions, not APIs") read strictly: the functions are the *protocol operations*, not the scalar primitives they are built on.
+
 ---
 
 ## 1. Scope Statement

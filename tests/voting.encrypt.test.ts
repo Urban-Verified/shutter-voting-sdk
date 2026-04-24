@@ -1,4 +1,5 @@
-import { G2Point, initCurves, randomScalar } from '../src';
+import { G2Point, initCurves } from '../src';
+import { randomScalar } from '../src/crypto/field';
 import {
   encrypt,
   addCt,

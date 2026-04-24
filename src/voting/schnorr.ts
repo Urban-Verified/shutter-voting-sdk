@@ -32,6 +32,11 @@ export function schnorrKeygen(sk: bigint = randomScalar()): {
   vk: G1Point;
 } {
   const reduced = modQ(sk);
+  if (reduced === 0n) {
+    // sk = 0 ⇒ vk = identity, and `s·P₁ == R + e·O = R` makes every
+    // signature trivially verify. Spec assumes random sk, so reject.
+    throw new Error('schnorrKeygen: sk must be non-zero mod Q');
+  }
   const vk = G1Point.generator().mul(reduced);
   return { sk: reduced, vk };
 }
@@ -53,6 +58,9 @@ export function schnorrVerify(
   msg: Uint8Array,
   sig: SchnorrSig,
 ): boolean {
+  // Identity vk trivially satisfies `s·P₁ == R + e·O = R`, so any
+  // (R = s·P₁, s) pair passes regardless of msg. Reject at the gate.
+  if (vk.isIdentity()) return false;
   const e = challenge(sig.R, vk, msg);
   const lhs = G1Point.generator().mul(sig.s);
   const rhs = sig.R.add(vk.mul(e));

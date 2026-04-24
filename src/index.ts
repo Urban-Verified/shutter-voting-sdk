@@ -1,54 +1,37 @@
-export * from './crypto/blst/types';
+// Public surface of @shutter-network/shutter-voting-sdk.
+//
+// Exports here are the ones actors in the Munich Personalratswahl flow
+// actually need: voter, Vote Registry / Proxy, Tally Aggregator, auditor,
+// and keyper. Scalar / field / hash primitives, bare DLEQ, standalone OR /
+// budget verifiers, and byte-size constants stay internal — callers work
+// in terms of ciphertexts, proofs, signatures, and ballot-level verify.
+
 export { initCurves } from './crypto/init';
 export { G1Point, G2Point, G1_BYTES, G2_BYTES } from './crypto/curve';
-export {
-  Q,
-  SCALAR_BYTES,
-  bytesToBigIntBE,
-  bigIntToBytesBE,
-  modQ,
-  wideReduce,
-  randomScalar,
-  scalarToBytes,
-  scalarFromBytes,
-  scalarInv,
-} from './crypto/field';
-export {
-  hashToScalar,
-  DST_FIAT_SHAMIR,
-  DST_HASH_TO_CURVE_G1,
-  DST_HASH_TO_CURVE_G2,
-} from './crypto/hash';
 
-// Voting
+// Voting types
 export type {
   Ciphertext,
   SchnorrSig,
   DLEQProof,
   ORProof,
-  ORProofBranch,
   BudgetProof,
   BallotValidityProof,
-  KeyperPublicShare,
   PartialDecryption,
 } from './voting/types';
+
 export { encrypt, addCt, scalarMulCt, sumCts } from './voting/encrypt';
 export { schnorrKeygen, schnorrSign, schnorrVerify } from './voting/schnorr';
 export { Transcript } from './voting/transcript';
+
+// Voter-side proof construction. Verifiers use `verifyBallot` (below); the
+// bare `verifyDLEQ`/`verifyOR`/`verifyBudget*` primitives are internal.
 export {
-  proveDLEQ,
-  verifyDLEQ,
   proveOR,
-  verifyOR,
   proveBudgetExact,
-  verifyBudgetExact,
   proveBudgetAtMost,
-  verifyBudgetAtMost,
-  verifyBudget,
 } from './voting/proofs';
 export type {
-  DLEQStatement,
-  DLEQWitness,
   ORStatement,
   ORWitness,
   ORCommitments,
@@ -56,12 +39,20 @@ export type {
   ExactBudgetWitness,
   AtMostBudgetWitness,
 } from './voting/proofs';
+
 export {
   canonicalBallotMessage,
   seedBallotTranscript,
   rangeCandidates,
   verifyBallot,
 } from './voting/verify';
+export type {
+  BallotInputs,
+  BallotVerifyParams,
+  VerifyResult,
+  WRAttestationVerifier,
+} from './voting/verify';
+
 export {
   partialDecrypt,
   verifyDecryptionShare,
@@ -71,20 +62,12 @@ export {
   buildBabyStepTable,
 } from './voting/decrypt';
 export type { BabyStepTable } from './voting/decrypt';
-export type {
-  BallotInputs,
-  BallotVerifyParams,
-  VerifyResult,
-  WRAttestationVerifier,
-} from './voting/verify';
+
+// Wire codecs — producers only (encode on prove/sign side, decode only
+// where the verifier needs on-chain bytes it can't get from `verifyBallot`).
 export {
   encodeBallotValidityProof,
-  decodeBallotValidityProof,
   encodeDLEQ,
   decodeDLEQ,
   encodeSchnorr,
-  decodeSchnorr,
-  BVP_VERSION,
-  SCHNORR_BYTES,
 } from './contract/codec';
-export type { DecodeParams } from './contract/codec';

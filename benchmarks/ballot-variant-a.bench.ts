@@ -10,9 +10,9 @@ import {
   G2Point,
   encodeBallotValidityProof,
   initCurves,
-  randomScalar,
   verifyBallot,
 } from '../src';
+import { randomScalar } from '../src/crypto/field';
 import { bench, printTable } from './lib/timer';
 import { buildBallot, distribute } from './lib/ballot';
 

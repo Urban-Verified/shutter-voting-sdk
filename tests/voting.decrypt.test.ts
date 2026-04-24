@@ -17,21 +17,19 @@ import {
   type BabyStepTable,
   type Ciphertext,
   G2Point,
-  Q,
   Transcript,
   addCt,
   buildBabyStepTable,
   combineShares,
   encrypt,
   initCurves,
-  modQ,
   partialDecrypt,
-  randomScalar,
   recoverDiscreteLog,
   recoverDiscreteLogWithTable,
   sumCts,
   verifyDecryptionShare,
 } from '../src';
+import { Q, modQ, randomScalar } from '../src/crypto/field';
 
 beforeAll(async () => {
   await initCurves();
@@ -136,6 +134,37 @@ describe('partialDecrypt / verifyDecryptionShare', () => {
     expect(verifyDecryptionShare(ct, forged, dkg.mpk_k[0]!, new Transcript('x'))).toBe(false);
   });
 
+  it('rejects out-of-range keyperIndex at verify time (shares are untrusted inputs)', () => {
+    const dkg = simulateDKG(1, 3);
+    const { ct } = encrypt(3n, dkg.mpk);
+    const share = partialDecrypt(ct, dkg.msk_k[0]!, dkg.mpk_k[0]!, 1, new Transcript('x'));
+
+    expect(
+      verifyDecryptionShare(
+        ct,
+        { ...share, keyperIndex: 0 },
+        dkg.mpk_k[0]!,
+        new Transcript('x'),
+      ),
+    ).toBe(false);
+    expect(
+      verifyDecryptionShare(
+        ct,
+        { ...share, keyperIndex: 70000 },
+        dkg.mpk_k[0]!,
+        new Transcript('x'),
+      ),
+    ).toBe(false);
+    expect(
+      verifyDecryptionShare(
+        ct,
+        { ...share, keyperIndex: 1.5 as unknown as number },
+        dkg.mpk_k[0]!,
+        new Transcript('x'),
+      ),
+    ).toBe(false);
+  });
+
   it('rejects verification with a different ciphertext', () => {
     const dkg = simulateDKG(1, 3);
     const { ct } = encrypt(3n, dkg.mpk);
@@ -234,8 +263,10 @@ describe('combineShares', () => {
   it('rejects duplicate evaluation points', () => {
     const dkg = simulateDKG(1, 3);
     const { ct } = encrypt(1n, dkg.mpk);
-    const s0 = partialDecrypt(ct, dkg.msk_k[0]!, dkg.mpk_k[0]!, 1, new Transcript('x'));
-    const s1 = partialDecrypt(ct, dkg.msk_k[1]!, dkg.mpk_k[1]!, 2, new Transcript('x'));
+    // Two shares with the same keyperIndex → the new α === keyperIndex
+    // check passes (both α = 3), and the duplicate-alpha check fires.
+    const s0 = partialDecrypt(ct, dkg.msk_k[0]!, dkg.mpk_k[0]!, 3, new Transcript('x'));
+    const s1 = partialDecrypt(ct, dkg.msk_k[1]!, dkg.mpk_k[1]!, 3, new Transcript('x'));
     expect(() => combineShares([s0, s1], [3n, 3n], ct)).toThrow(/duplicate/);
   });
 
@@ -245,6 +276,16 @@ describe('combineShares', () => {
     const s0 = partialDecrypt(ct, dkg.msk_k[0]!, dkg.mpk_k[0]!, 1, new Transcript('x'));
     expect(() => combineShares([s0], [0n], ct)).toThrow(/is 0 mod Q/);
     expect(() => combineShares([s0], [Q], ct)).toThrow(/is 0 mod Q/); // Q ≡ 0
+  });
+
+  it('rejects α ≠ keyperIndex to prevent silent wrong-tally', () => {
+    const dkg = simulateDKG(1, 3);
+    const { ct } = encrypt(1n, dkg.mpk);
+    const s0 = partialDecrypt(ct, dkg.msk_k[0]!, dkg.mpk_k[0]!, 1, new Transcript('x'));
+    const s1 = partialDecrypt(ct, dkg.msk_k[1]!, dkg.mpk_k[1]!, 2, new Transcript('x'));
+    // Valid individually, but permuted α — would Lagrange-interpolate to
+    // the wrong polynomial without this guard.
+    expect(() => combineShares([s0, s1], [2n, 1n], ct)).toThrow(/keyperIndex/);
   });
 });
 

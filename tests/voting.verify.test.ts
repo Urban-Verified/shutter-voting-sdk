@@ -3,6 +3,7 @@ import {
   BallotInputs,
   BallotValidityProof,
   BallotVerifyParams,
+  G1Point,
   G2Point,
   canonicalBallotMessage,
   encodeBallotValidityProof,
@@ -12,7 +13,6 @@ import {
   proveBudgetAtMost,
   proveBudgetExact,
   proveOR,
-  randomScalar,
   rangeCandidates,
   schnorrKeygen,
   schnorrSign,
@@ -20,6 +20,7 @@ import {
   sumCts,
   verifyBallot,
 } from '../src';
+import { randomScalar } from '../src/crypto/field';
 
 beforeAll(async () => {
   await initCurves();
@@ -251,6 +252,220 @@ describe('canonicalBallotMessage', () => {
         zkProof: new Uint8Array(0),
       }),
     ).toThrow(/96 bytes/);
+  });
+
+  it('rejects electionId of the wrong length', () => {
+    for (const len of [0, 16, 31, 33, 64]) {
+      expect(() =>
+        canonicalBallotMessage({
+          electionId: new Uint8Array(len),
+          pseudonym: new Uint8Array(32),
+          ciphertexts: [],
+          zkProof: new Uint8Array(0),
+        }),
+      ).toThrow(/electionId.*32 bytes/);
+    }
+  });
+
+  it('rejects pseudonym of the wrong length', () => {
+    for (const len of [0, 16, 31, 33, 64]) {
+      expect(() =>
+        canonicalBallotMessage({
+          electionId: new Uint8Array(32),
+          pseudonym: new Uint8Array(len),
+          ciphertexts: [],
+          zkProof: new Uint8Array(0),
+        }),
+      ).toThrow(/pseudonym.*32 bytes/);
+    }
+  });
+});
+
+describe('verifyBallot — parameter validation (fail-closed on junk inputs)', () => {
+  const validParams: BallotVerifyParams = {
+    numCandidates: 3,
+    budget: 2,
+    mode: 'exact',
+    variant: 'A',
+  };
+  // Minimal inputs — sufficient to reach the parameter prologue. These tests
+  // only exercise the pre-decode rejections, so ballot-level soundness does
+  // not need to hold.
+  const minimalInputs = (): BallotInputs => ({
+    electionId: new Uint8Array(32),
+    pseudonym: new Uint8Array(32),
+    vk: G1Point.generator().toBytes(),
+    ciphertexts: [],
+    zkProof: new Uint8Array(0),
+    voterSignature: new Uint8Array(80),
+    wrAttestation: new Uint8Array(0),
+  });
+
+  it('rejects non-integer numCandidates', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(
+      minimalInputs(),
+      { ...validParams, numCandidates: 1.5 },
+      mpk,
+      accept,
+    );
+    expect(r).toEqual({ ok: false, reason: 'numCandidates must be an integer' });
+  });
+
+  it('rejects numCandidates below 1', () => {
+    const { mpk } = trustedSetup();
+    for (const n of [0, -1, -0x10000]) {
+      const r = verifyBallot(minimalInputs(), { ...validParams, numCandidates: n }, mpk, accept);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toMatch(/numCandidates.*out of range/);
+    }
+  });
+
+  it('rejects numCandidates above 0xFFFF (codec u16 ceiling)', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(
+      minimalInputs(),
+      { ...validParams, numCandidates: 0x10000 },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/numCandidates.*out of range/);
+  });
+
+  it('rejects non-integer budget', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 1.5 }, mpk, accept);
+    expect(r).toEqual({ ok: false, reason: 'budget must be an integer' });
+  });
+
+  it('rejects budget = 0 (Munich spec requires B ≥ 1)', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0 }, mpk, accept);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
+  });
+
+  it('rejects negative budget', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: -1 }, mpk, accept);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
+  });
+
+  it('rejects budget above 0xFFFF', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0x10000 }, mpk, accept);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
+  });
+
+  it('rejects unknown mode', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(
+      minimalInputs(),
+      { ...validParams, mode: 'bogus' as unknown as 'exact' },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/unknown mode/);
+  });
+
+  it('rejects unknown variant', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(
+      minimalInputs(),
+      { ...validParams, variant: 'C' as unknown as 'A' },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/unknown variant/);
+  });
+
+  it('rejects Variant B with non-integer d', () => {
+    const { mpk } = trustedSetup();
+    const r = verifyBallot(
+      minimalInputs(),
+      { numCandidates: 3, budget: 3, mode: 'exact', variant: 'B', d: 1.5 },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/Variant B requires a positive integer d/);
+  });
+
+  it('rejects Variant B with d ≤ 0', () => {
+    const { mpk } = trustedSetup();
+    for (const d of [0, -1]) {
+      const r = verifyBallot(
+        minimalInputs(),
+        { numCandidates: 3, budget: 3, mode: 'exact', variant: 'B', d },
+        mpk,
+        accept,
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toMatch(/Variant B requires a positive integer d/);
+    }
+  });
+
+  it('rejects electionId whose byte length is not 32', () => {
+    const { mpk } = trustedSetup();
+    for (const len of [0, 16, 31, 33, 64]) {
+      const r = verifyBallot(
+        { ...minimalInputs(), electionId: new Uint8Array(len) },
+        validParams,
+        mpk,
+        accept,
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toMatch(/electionId must be 32 bytes/);
+    }
+  });
+
+  it('rejects pseudonym whose byte length is not 32', () => {
+    const { mpk } = trustedSetup();
+    for (const len of [0, 16, 31, 33, 64]) {
+      const r = verifyBallot(
+        { ...minimalInputs(), pseudonym: new Uint8Array(len) },
+        validParams,
+        mpk,
+        accept,
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toMatch(/pseudonym must be 32 bytes/);
+    }
+  });
+
+  it('rejects identity mpk (collapses ciphertext privacy)', () => {
+    const mpk = G2Point.identity();
+    const r = verifyBallot(minimalInputs(), validParams, mpk, accept);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/mpk is the identity/);
+  });
+
+  it('rejects identity vk (sk=0 trivially verifies every signature)', () => {
+    const { mpk } = trustedSetup();
+    // ciphertexts still empty — but the identity-vk check fires *after*
+    // ciphertexts.length, so we need to pass a params/inputs pair where
+    // expectedCts = 0. Variant A with numCandidates matching length = 0
+    // would violate numCandidates ≥ 1, so instead give Variant A inputs
+    // with numCandidates=1 and a single 96-byte placeholder ct — its G2
+    // decode happens later, after the vk identity guard fires.
+    const inputs: BallotInputs = {
+      ...minimalInputs(),
+      vk: G1Point.identity().toBytes(),
+      ciphertexts: [[G2Point.generator().toBytes(), G2Point.generator().toBytes()]],
+    };
+    const r = verifyBallot(
+      inputs,
+      { numCandidates: 1, budget: 1, mode: 'exact', variant: 'A' },
+      mpk,
+      accept,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/vk is the identity/);
   });
 });
 
@@ -530,7 +745,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
     expect(verifyBallot(inputs, params, mpk, accept).ok).toBe(true);
   });
 
-  it('ciphertext count mismatch is flagged against ℓ·d', () => {
+  it('mismatched d is rejected (exact ⌈log₂(B+1)⌉ required)', () => {
     const { mpk } = trustedSetup();
     const { inputs } = buildBallot({
       mpk,
@@ -539,7 +754,9 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       votes: [2n, 1n, 0n],
       params: baseParams,
     });
-    // ciphertexts has ℓ·d = 6; ask the verifier to expect a different d.
+    // ciphertexts has ℓ·d = 6; the verifier is asked to expect d=3 but
+    // spec d = ⌈log₂(B+1)⌉ = 2 for B=3, so verification rejects on d
+    // mismatch before ever reaching the ciphertext-count check.
     const r = verifyBallot(
       inputs,
       { ...baseParams, d: 3 },
@@ -547,7 +764,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       accept,
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/ciphertexts\.length/);
+    if (!r.ok) expect(r.reason).toMatch(/d \(3\) must equal/);
   });
 
   it('rejects a ballot with a tampered bit ciphertext', () => {
@@ -572,7 +789,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
     expect(r.ok).toBe(false);
   });
 
-  it('rejects when d is too small for the declared budget', () => {
+  it('rejects when d disagrees with the declared budget', () => {
     const { mpk } = trustedSetup();
     const { inputs } = buildBallot({
       mpk,
@@ -583,12 +800,12 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
     });
     const r = verifyBallot(
       inputs,
-      { ...baseParams, budget: 7, d: 2 }, // needs d ≥ 3
+      { ...baseParams, budget: 7, d: 2 }, // spec requires d = 3 for B=7
       mpk,
       accept,
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/2\^d/);
+    if (!r.ok) expect(r.reason).toMatch(/must equal ⌈log₂/);
   });
 
   it('rejects a ballot when budget mode differs from the on-wire tag', () => {

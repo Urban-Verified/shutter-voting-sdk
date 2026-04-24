@@ -78,6 +78,13 @@ export function verifyDecryptionShare(
   committeePK: G2Point,
   t: Transcript,
 ): boolean {
+  if (
+    !Number.isInteger(share.keyperIndex) ||
+    share.keyperIndex < 1 ||
+    share.keyperIndex > 0xffff
+  ) {
+    return false;
+  }
   bindDecryptionShare(t, ctSum, committeePK, share.keyperIndex);
   return verifyDLEQ(
     decryptionShareDLEQInstance(ctSum, committeePK, share.sigma),
@@ -122,7 +129,11 @@ function bindDecryptionShare(
  * `verifyDecryptionShare`; this function does not re-verify.
  *
  *   evaluationPoints[i] = α_i  (the x-coordinate of shares[i] on the
- *   DKG secret-sharing polynomial; typically α_i = shares[i].keyperIndex).
+ *   DKG secret-sharing polynomial). Per the CRY spec §6.3, keyper k's
+ *   evaluation point is the 1-based index α_k, so this function
+ *   enforces `evaluationPoints[i] === shares[i].keyperIndex` — passing
+ *   a permuted or mismatched α silently produces a wrong-tally τ, which
+ *   is worse than an exception.
  *
  * The number of shares must be exactly t+1 from the caller's perspective
  * — but this function doesn't know t. It just Lagrange-interpolates at
@@ -148,6 +159,13 @@ export function combineShares(
     const a = modQ(evaluationPoints[i]!);
     if (a === 0n) {
       throw new Error(`combineShares: evaluation point at index ${i} is 0 mod Q`);
+    }
+    const expected = BigInt(shares[i]!.keyperIndex);
+    if (a !== expected) {
+      throw new Error(
+        `combineShares: evaluationPoints[${i}] (${a}) must equal shares[${i}].keyperIndex (${expected}) — ` +
+          `mismatched α produces a wrong-tally τ indistinguishable from a correct one at the BSGS layer`,
+      );
     }
     alphas[i] = a;
   }

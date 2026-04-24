@@ -1,4 +1,5 @@
-import { G1Point, Q, initCurves, modQ, randomScalar } from '../src';
+import { G1Point, initCurves } from '../src';
+import { Q, modQ, randomScalar } from '../src/crypto/field';
 import {
   schnorrKeygen,
   schnorrSign,
@@ -99,5 +100,25 @@ describe('Schnorr', () => {
       expect(sig.s).toBeGreaterThanOrEqual(0n);
       expect(sig.s).toBeLessThan(Q);
     }
+  });
+
+  it('keygen rejects sk = 0 mod Q (identity vk would trivially verify every sig)', () => {
+    expect(() => schnorrKeygen(0n)).toThrow(/non-zero/);
+    // Q itself reduces to 0 mod Q — same attack.
+    expect(() => schnorrKeygen(Q)).toThrow(/non-zero/);
+    // 2·Q likewise reduces to 0.
+    expect(() => schnorrKeygen(Q * 2n)).toThrow(/non-zero/);
+  });
+
+  it('verify rejects an identity vk regardless of (R, s)', () => {
+    const vk = G1Point.identity();
+    const msg = new TextEncoder().encode('anything');
+    // (R = s·P₁, any s) algebraically satisfies s·P₁ == R + e·O, so without
+    // the identity guard this would spuriously verify.
+    const s = 12345n;
+    const R = G1Point.generator().mul(s);
+    expect(schnorrVerify(vk, msg, { R, s })).toBe(false);
+    // A totally unrelated (R, s) also stays false — no path to acceptance.
+    expect(schnorrVerify(vk, msg, { R: G1Point.generator(), s: 1n })).toBe(false);
   });
 });

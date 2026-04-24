@@ -1,20 +1,20 @@
 import {
   BudgetProof,
   G2Point,
-  Q,
   Transcript,
   addCt,
   encrypt,
   initCurves,
-  modQ,
   proveBudgetAtMost,
   proveBudgetExact,
-  randomScalar,
   sumCts,
+} from '../src';
+import { Q, modQ, randomScalar } from '../src/crypto/field';
+import {
   verifyBudget,
   verifyBudgetAtMost,
   verifyBudgetExact,
-} from '../src';
+} from '../src/voting/proofs';
 
 beforeAll(async () => {
   await initCurves();

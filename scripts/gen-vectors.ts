@@ -31,11 +31,9 @@ import {
   encodeSchnorr,
   encrypt,
   initCurves,
-  modQ,
   partialDecrypt,
   proveBudgetAtMost,
   proveBudgetExact,
-  proveDLEQ,
   proveOR,
   rangeCandidates,
   schnorrKeygen,
@@ -43,11 +41,15 @@ import {
   seedBallotTranscript,
   sumCts,
   verifyBallot,
-  verifyBudget,
   verifyDecryptionShare,
+} from '../src';
+import { modQ } from '../src/crypto/field';
+import {
+  proveDLEQ,
+  verifyBudget,
   verifyDLEQ,
   verifyOR,
-} from '../src';
+} from '../src/voting/proofs';
 import {
   BallotVector,
   BudgetVector,

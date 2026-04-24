@@ -1,4 +1,5 @@
-import { G1Point, G2Point, Q, Transcript, initCurves, modQ } from '../src';
+import { G1Point, G2Point, Transcript, initCurves } from '../src';
+import { Q, modQ } from '../src/crypto/field';
 
 beforeAll(async () => {
   await initCurves();

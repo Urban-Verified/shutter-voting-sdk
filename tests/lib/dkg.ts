@@ -6,7 +6,8 @@
  * ourselves and hand out evaluations as if the DKG succeeded.
  */
 
-import { G2Point, modQ, randomScalar } from '../../src';
+import { G2Point } from '../../src';
+import { modQ, randomScalar } from '../../src/crypto/field';
 
 export interface DKGSim {
   msk: bigint;

@@ -19,11 +19,11 @@ import {
   encrypt,
   initCurves,
   partialDecrypt,
-  randomScalar,
   recoverDiscreteLogWithTable,
   sumCts,
   verifyDecryptionShare,
 } from '../src';
+import { randomScalar } from '../src/crypto/field';
 import { bench } from './lib/timer';
 
 beforeAll(async () => {
