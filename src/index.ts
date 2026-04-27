@@ -53,6 +53,13 @@ export type {
   WRAttestationVerifier,
 } from './voting/verify';
 
+// High-level actor wrappers — collapse multi-step voter and tally
+// aggregator flows into one call. The lower-level primitives above
+// remain exported for vector generation, audits, and bespoke
+// aggregation paths.
+export { buildBallot, recoverTally } from './voting/highlevel';
+export type { BuildBallotArgs, RecoverTallyArgs } from './voting/highlevel';
+
 export {
   partialDecrypt,
   verifyDecryptionShare,

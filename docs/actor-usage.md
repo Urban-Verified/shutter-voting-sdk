@@ -5,18 +5,21 @@ the **exact SDK functions** they must call and the **exact arguments** they
 must supply. It is a reading of `src/index.ts`: only symbols exported from the
 SDK are named here.
 
-The four actors covered:
+The five actors covered:
 
 1. **Election Authority** — publishes election parameters; does not call the
    SDK at runtime but fixes the values everybody else passes in.
 2. **Voter (frontend / client)** — encrypts votes, builds the ballot validity
-   proof, signs the canonical preimage.
+   proof, signs the canonical preimage. **One wrapper call:** `buildBallot`.
 3. **Vote Registry / Vote Proxy / auditor (ballot verifier)** — verifies each
-   submitted ballot before it is admitted to the tally.
+   submitted ballot before it is admitted to the tally. **One call:**
+   `verifyBallot`.
 4. **Keyper (committee member)** — after the vote phase closes, computes a
-   partial decryption share on the homomorphic ciphertext sum.
+   partial decryption share on the homomorphic ciphertext sum. **One call:**
+   `partialDecrypt`.
 5. **Tally Aggregator** — verifies keyper shares, combines a threshold set,
-   runs BSGS to recover each candidate's integer tally.
+   runs BSGS to recover each candidate's integer tally. **One wrapper
+   call:** `recoverTally`.
 
 > Every caller **must** call `await initCurves()` exactly once before
 > invoking anything else. The BLST WASM heap is a singleton and is not
@@ -61,13 +64,13 @@ on-chain constants that every other actor reads. Those constants are:
 | Constant           | Used by                                              | Notes                                                                 |
 | ------------------ | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | `electionId` (32B) | voter, verifier, keyper transcript                   | Bound into `canonicalBallotMessage` and `seedBallotTranscript`.       |
-| `mpk: G2Point`     | voter (to encrypt), verifier, keyper                 | Committee public key from DKG. Must **not** be the identity.          |
+| `mpk: G2Point`     | voter (to encrypt), verifier, keyper                 | Committee public key from DKG (should be published by keypers).       |
 | `numCandidates ℓ`  | voter, verifier                                      | Number of candidates on the ballot.                                   |
 | `budget B`         | voter, verifier, tally (BSGS upper bound = `ℓ · B`) | Max votes per ballot.                                                 |
 | `mode`             | voter, verifier                                      | `'exact'` forces V = B; `'atMost'` allows V ≤ B.                      |
 | `variant`          | voter, verifier                                      | `'A'` = direct range proofs; `'B'` = bit-decomposition.               |
 | `d` (Variant B)    | voter, verifier                                      | **Must** be `Math.ceil(Math.log2(B + 1))`.                            |
-| Keyper committee   | tally aggregator, auditors                           | Each keyper k holds `msk_k`; its `mpk_k = msk_k · P₂` is on chain.   |
+| Keyper committee   | tally aggregator, auditors                           | Each keyper k holds `msk_k`; its `mpk_k = msk_k · P₂` is on chain.    |
 | Threshold `t`      | tally aggregator                                     | Need any `t + 1` verified shares to reconstruct.                      |
 
 The Election Authority itself calls **no SDK functions**.
@@ -77,9 +80,11 @@ The Election Authority itself calls **no SDK functions**.
 ## 2. Voter (frontend / client)
 
 The voter's job is to produce a `BallotInputs` struct and submit it to the
-Vote Registry. Concrete call sequence:
+Vote Registry. With the high-level wrapper this is **two calls**:
+`schnorrKeygen` (for the ephemeral keypair the WR-Server attests over), then
+`buildBallot` for everything else.
 
-### 2.1 Key material
+### 2.1 Ephemeral keypair + WR registration
 
 ```ts
 import { schnorrKeygen } from '@shutter-network/shutter-voting-sdk';
@@ -89,205 +94,85 @@ const { sk, vk } = schnorrKeygen();           // sk: bigint, vk: G1Point
 ```
 
 The voter registers `vk.toBytes()` with the Wahlregister-Server to obtain the
-WR attestation (`wrAttestation: Uint8Array`) and a `pseudonym: Uint8Array` (32
-bytes). **Both are opaque to the SDK** — the SDK only passes them through to
-the caller-supplied attestation verifier.
+WR attestation (`wrAttestation: Uint8Array`) and a `pseudonym: Uint8Array`
+(32 bytes). **Both are opaque to the SDK** — the SDK only passes them
+through to the caller-supplied attestation verifier on the verifier side.
 
-### 2.2 Encrypt votes
-
-Let `votes: bigint[]` be the length-`ℓ` vector of per-candidate votes. Each
-`votes[j] ∈ [0, B]` and, when `mode === 'exact'`, `Σ votes[j] === B`.
-
-**Variant A** — one ciphertext per candidate:
+### 2.2 Build the ballot in one call
 
 ```ts
-import { encrypt } from '@shutter-network/shutter-voting-sdk';
+import {
+  buildBallot,
+  type BallotInputs,
+  type BallotVerifyParams,
+  type G2Point,
+} from '@shutter-network/shutter-voting-sdk';
 
-const perCand = votes.map((v) => encrypt(v, mpk));  // { ct, r }[]
-const cts = perCand.map(p => p.ct);                 // Ciphertext[ℓ]
-const rs  = perCand.map(p => p.r);                  // bigint[ℓ]
-```
+const params: BallotVerifyParams = {
+  numCandidates: ℓ,
+  budget:        B,
+  mode:          'atMost',  // or 'exact'
+  variant:       'A',       // or 'B' (then set d = Math.ceil(Math.log2(B+1)))
+};
 
-**Variant B** — `ℓ · d` bit ciphertexts (d = ⌈log₂(B+1)⌉):
-
-```ts
-const d = Math.ceil(Math.log2(B + 1));
-const cts: Ciphertext[] = [];
-const rs:  bigint[]     = [];
-for (let j = 0; j < votes.length; j++) {
-  for (let k = 0; k < d; k++) {
-    const bit = (votes[j] >> BigInt(k)) & 1n;
-    const { ct, r } = encrypt(bit, mpk);
-    cts.push(ct);
-    rs.push(r);
-  }
-}
-```
-
-### 2.3 Seed the ballot transcript
-
-```ts
-import { seedBallotTranscript } from '@shutter-network/shutter-voting-sdk';
-
-const t = seedBallotTranscript(electionId, mpk, vk, cts, params);
-```
-
-The transcript must be passed by reference into every proof call below — the
-prover and verifier derive the Fiat–Shamir challenges from the same running
-hash.
-
-### 2.4 Range / bit proofs
-
-**Variant A** — one `(B+1)`-branch OR per candidate, candidate set
-`{0, 1, …, B}`:
-
-```ts
-import { proveOR, rangeCandidates } from '@shutter-network/shutter-voting-sdk';
-
-const candidates = rangeCandidates(B);                   // [0n, …, BigInt(B)]
-const rangeOrBit = cts.map((ct, j) => {
-  t.append('ballot:range', u16BE(j));                    // per-candidate tag
-  return proveOR(
-    { ct, mpk, candidates },
-    { r: rs[j]!, trueIndex: Number(votes[j]!) },         // witness
-    t,
-  );
+const inputs: BallotInputs = buildBallot({
+  mpk,                  // G2Point — committee public key from chain
+  electionId,           // Uint8Array(32)
+  pseudonym,            // Uint8Array(32) issued by WR-Server
+  sk,                   // bigint — from schnorrKeygen above
+  vk,                   // G1Point — from schnorrKeygen above
+  votes,                // bigint[] of length ℓ; each in [0, B] (Variant A)
+  params,
+  wrAttestation,        // Uint8Array — opaque WR-Server attestation bytes
 });
 ```
 
-**Variant B** — one 2-branch OR per bit, candidate set `[0n, 1n]`:
+`buildBallot` internally:
+
+1. Encrypts each vote (Variant A) or each bit (Variant B) under `mpk`,
+   sampling fresh per-ciphertext randomness `r_j`.
+2. Seeds the ballot Fiat–Shamir transcript with `(electionId, mpk, vk,
+   ciphertexts, params)`.
+3. Runs one OR proof per candidate (Variant A) or per bit (Variant B).
+4. Homomorphically sums the ciphertexts (Variant A) or
+   `Σ_j Σ_k 2^k · c_{j,k}` (Variant B), and produces the matching budget
+   proof (`exact` or `atMost`).
+5. Encodes the validity proof, builds the canonical preimage, and
+   Schnorr-signs `keccak256(preimage)` with `sk`.
+
+The per-ciphertext randomness `r_j` is **dropped on return** — the caller
+cannot accidentally retain it.
+
+### 2.3 Final submission
+
+The returned `inputs: BallotInputs` is exactly the payload the voter hands
+off to the Vote Registry:
 
 ```ts
-const rangeOrBit = [];
-for (let jk = 0; jk < cts.length; jk++) {
-  const j = Math.floor(jk / d), k = jk % d;
-  const bit = Number((votes[j]! >> BigInt(k)) & 1n) as 0 | 1;
-  t.append('ballot:bit', u16BE(jk));
-  rangeOrBit.push(
-    proveOR(
-      { ct: cts[jk]!, mpk, candidates: [0n, 1n] },
-      { r: rs[jk]!, trueIndex: bit },
-      t,
-    ),
-  );
-}
+// inputs already has shape:
+// {
+//   electionId,                 // bytes32
+//   pseudonym,                  // bytes32
+//   vk:              Uint8Array(48),     // compressed G₁
+//   ciphertexts:     [Uint8Array, Uint8Array][],   // 96B + 96B per pair
+//   zkProof:         Uint8Array,         // encodeBallotValidityProof output
+//   voterSignature:  Uint8Array(80),     // encodeSchnorr output
+//   wrAttestation:   Uint8Array,
+// }
 ```
 
-`u16BE(n)` is a 2-byte big-endian encoding of the index — the verifier's copy
-in `verifyBallot` uses the same label, so reproduce it verbatim. (The helper
-is two lines; see `benchmarks/lib/ballot.ts` for the canonical copy.)
-
-### 2.5 Budget proof
-
-Compute the homomorphic ciphertext sum and the matching randomness sum:
-
-**Variant A**
-
-```ts
-import { sumCts } from '@shutter-network/shutter-voting-sdk';
-const ctSum = sumCts(cts);
-const rSum  = rs.reduce((a, r) => a + r, 0n);
-```
-
-**Variant B** — weight each bit by `2^k`:
-
-```ts
-const weighted = cts.map((ct, i) => ({
-  ct,
-  r: rs[i]!,
-  w: 1n << BigInt(i % d),
-}));
-const ctSum = weighted
-  .map(({ ct, w }) => ({ c1: ct.c1.mul(w), c2: ct.c2.mul(w) }))
-  .reduce((acc, cur) => ({
-    c1: acc.c1.add(cur.c1),
-    c2: acc.c2.add(cur.c2),
-  }));
-const rSum = weighted.reduce((a, { r, w }) => a + r * w, 0n);
-```
-
-Then:
-
-```ts
-import { proveBudgetExact, proveBudgetAtMost } from '@shutter-network/shutter-voting-sdk';
-
-const V = votes.reduce((a, b) => a + b, 0n);
-t.append('ballot:budget', new Uint8Array([0]));       // separator tag
-
-const budget =
-  params.mode === 'exact'
-    ? proveBudgetExact(
-        { ctSum, mpk, budget: BigInt(B) },
-        { rSum },
-        t,
-      )
-    : proveBudgetAtMost(
-        { ctSum, mpk, budget: BigInt(B) },
-        { rSum, V },
-        t,
-      );
-```
-
-### 2.6 Encode the ballot validity proof
-
-```ts
-import { encodeBallotValidityProof } from '@shutter-network/shutter-voting-sdk';
-
-const bvp = {
-  version: 0x01,
-  variant: params.variant,   // 'A' | 'B'
-  rangeOrBit,
-  budget,
-};
-const zkProof = encodeBallotValidityProof(bvp);       // Uint8Array
-```
-
-### 2.7 Schnorr-sign the canonical preimage
-
-```ts
-import { canonicalBallotMessage, schnorrSign, encodeSchnorr } from '@shutter-network/shutter-voting-sdk';
-import { keccak256 } from 'viem';
-
-const ciphertextBytes: [Uint8Array, Uint8Array][] = cts.map(
-  (ct) => [ct.c1.toBytes(), ct.c2.toBytes()],
-);
-const preimage = canonicalBallotMessage({
-  electionId,
-  pseudonym,
-  ciphertexts: ciphertextBytes,
-  zkProof,
-});
-const sig = schnorrSign(sk, vk, keccak256(preimage, 'bytes'));
-const voterSignature = encodeSchnorr(sig);            // 80 bytes
-```
-
-### 2.8 Final submission payload
-
-The voter hands off this exact `BallotInputs` shape to the Vote Registry:
-
-```ts
-const inputs: BallotInputs = {
-  electionId,                 // bytes32
-  pseudonym,                  // bytes32
-  vk: vk.toBytes(),           // 48 bytes, compressed G₁
-  ciphertexts: ciphertextBytes,
-  zkProof,                    // encodeBallotValidityProof output
-  voterSignature,             // encodeSchnorr output (80 B)
-  wrAttestation,              // opaque WR-Server attestation bytes
-};
-```
-
-> ⚠ After submission the voter **must discard `sk`, every `r_j`, and `votes`**.
-> Retaining `r_j` would let anyone recovering it recompute each `Enc(v_j; r_j)`
-> and deanonymise the ballot.
+> ⚠ After the Vote Registry acknowledges submission, the voter **must
+> discard `sk` and `votes`**. `r_j` is already gone. Retaining `sk` would
+> let a coercer present a vk-bound proof of how the voter voted; the spec
+> assumes the voter destroys it (Munich §7.1 coercion resistance).
 
 ---
 
 ## 3. Ballot verifier (Vote Proxy / auditor)
 
-The verifier has one entry point: `verifyBallot`. It validates the ZK proofs,
-the homomorphic budget constraint, the Schnorr signature, and delegates the
-WR-Server attestation check to a caller-supplied function.
+The verifier has one entry point: `verifyBallot`. It validates the ZK
+proofs, the homomorphic budget constraint, the Schnorr signature, and
+delegates the WR-Server attestation check to a caller-supplied function.
 
 ```ts
 import {
@@ -335,7 +220,7 @@ if (!result.ok) {
 
 ### What `verifyBallot` does **not** do
 
-- It does not verify keyper shares (use `verifyDecryptionShare`).
+- It does not verify keyper shares (the tally aggregator handles that).
 - It does not pairing-check anything — no `verifyPairing` pass exists in this SDK.
 - It does not check that `pseudonym` has not voted twice — the caller-supplied
   registry layer must enforce that.
@@ -374,8 +259,8 @@ const share = partialDecrypt(
 // share: PartialDecryption { keyperIndex, sigma, proof }
 ```
 
-The `share` is published on chain; any tally aggregator or auditor can
-re-verify it using the same transcript seeding.
+The `share` is published on chain; the tally aggregator (and any auditor)
+re-verifies it using the **identical** transcript seeding.
 
 > **Keypers do not call anything else in this SDK.** DKG, share storage, and
 > keyper networking are intentionally out of scope.
@@ -384,78 +269,78 @@ re-verify it using the same transcript seeding.
 
 ## 5. Tally Aggregator
 
-The aggregator collects at least `t + 1` partial decryptions per candidate,
-verifies each, Lagrange-combines them to `τ_j = V_j · P₂`, and BSGS-recovers
-`V_j ∈ [0, ℓ·B]` (upper bound set by the Election Authority).
-
-### 5.1 Verify each keyper share
+The aggregator's job is one call:
 
 ```ts
 import {
-  verifyDecryptionShare,
   Transcript,
+  recoverTally,
+  type Ciphertext,
+  type G2Point,
+  type PartialDecryption,
 } from '@shutter-network/shutter-voting-sdk';
 
-// The aggregator must seed its Transcript *identically* to the keyper's:
-function makeShareTranscript(electionId: Uint8Array, j: number) {
+// Build a fresh transcript per (candidate, share) call, identically to
+// the keyper's seeding above.
+function transcriptFor(j: number, _share: PartialDecryption) {
   const t = new Transcript('SHUTTER-VOTE-DECRYPT-v1');
   t.append('electionId', electionId);
   t.append('candidate',  u16BE(j));
   return t;
 }
 
-const good = verifyDecryptionShare(
-  ctSum_j,
-  share,                               // PartialDecryption from chain
-  mpk_k,                               // committeePKs[share.keyperIndex - 1]
-  makeShareTranscript(electionId, j),
-);
-if (!good) throw new Error('bad share from keyper ' + share.keyperIndex);
+const tallies: bigint[] = recoverTally({
+  ctSums,                // Ciphertext[]            — one per candidate
+  sharesPerCandidate,    // PartialDecryption[][]   — outer length = ctSums.length;
+                         //                           each inner array ≥ threshold + 1
+  threshold,             // number                  — DKG threshold t
+  committeePKs,          // G2Point[]               — committeePKs[k-1] = mpk_k
+  upperBound: BigInt(numBallots) * BigInt(B),  // BSGS bound — total max votes / candidate
+  transcriptFor,
+});
+
+// tallies[j] is V_j, the integer total for candidate j.
 ```
 
-### 5.2 Combine a threshold subset
+`recoverTally` internally:
 
-Pick any `t + 1` verified shares. The evaluation points **must** match the
-keyper indices one-for-one — mismatch throws.
+1. **Verifies every supplied share** against the matching `committeePKs[k-1]`
+   using the caller's `transcriptFor(j, share)` factory. Throws on the first
+   bad share with `candidate ${j} share from keyper ${k} failed verification`.
+2. **Picks the first `threshold + 1` shares** per candidate and Lagrange-
+   interpolates them at zero (`combineShares`) to obtain `τ_j = V_j · P₂`.
+3. **Builds one BSGS baby-step table** sized to `upperBound` and reuses it
+   across all candidates; each per-candidate recovery is then a fast lookup.
 
-```ts
-import { combineShares } from '@shutter-network/shutter-voting-sdk';
+It throws if any share fails verification, if a referenced keyper index has
+no entry in `committeePKs`, if any candidate has fewer than `threshold + 1`
+shares, or if a recovered tally exceeds `upperBound` (the latter signals a
+tally-pipeline bug — admitted ballots whose homomorphic sum overshoots the
+declared bound, **not** a retry condition).
 
-const selected = verifiedShares.slice(0, threshold + 1);
-const alphas   = selected.map((s) => BigInt(s.keyperIndex));
-const tauJ     = combineShares(selected, alphas, ctSum_j);  // G2Point
-```
+---
 
-### 5.3 Recover the integer tally
+## When to reach past the wrappers
 
-Build the BSGS baby-step table **once** per election and reuse across all
-candidates; per-candidate recovery is then a fast lookup.
+`buildBallot` and `recoverTally` cover the production happy path. The
+lower-level primitives stay exported for:
 
-```ts
-import {
-  buildBabyStepTable,
-  recoverDiscreteLogWithTable,
-} from '@shutter-network/shutter-voting-sdk';
+- **Test-vector generation** — call `encrypt`, `proveOR`,
+  `proveBudgetExact` / `proveBudgetAtMost`, `partialDecrypt` directly so
+  you can inject deterministic randomness.
+- **Cross-implementation interop fixtures** — e.g. the `tests/vectors/`
+  decrypt-share / tally fixtures consume `verifyDecryptionShare`,
+  `combineShares`, and `recoverDiscreteLogWithTable` directly to exercise
+  externally produced shares.
+- **Audits** — auditors that want to re-derive intermediate values
+  (`ctSum`, individual range-proof checks) call `seedBallotTranscript`,
+  `verifyOR` (internal — exposed via `verifyBallot`), `sumCts`,
+  `verifyDecryptionShare`, etc.
+- **Bespoke Variant-B aggregation paths** that do not match the wrapper's
+  weighted-sum convention.
 
-const upperBound = BigInt(numBallots) * BigInt(B);    // ≥ max possible V_j
-const table = buildBabyStepTable(upperBound);
-
-for (let j = 0; j < numCandidates; j++) {
-  const V_j = recoverDiscreteLogWithTable(tauJ[j], table);  // bigint
-  console.log('candidate', j, 'got', V_j, 'votes');
-}
-```
-
-If you only have one tally to run, the single-call form is:
-
-```ts
-import { recoverDiscreteLog } from '@shutter-network/shutter-voting-sdk';
-const V_j = recoverDiscreteLog(tauJ, upperBound);
-```
-
-`recoverDiscreteLog*` throws if the recovered value exceeds `upperBound` —
-that is a tally-layer bug (admitted ballots whose sum exceeds the declared
-bound), not a retry condition.
+If you only need the Munich spec's standard flow, stick to the wrapper
+calls listed above.
 
 ---
 
@@ -465,24 +350,27 @@ bound), not a retry condition.
 | ----------------------------------- |:--------------:|:-----:|:---------------:|:------:|:----------:|
 | `initCurves`                        |                |   ✅  |       ✅        |   ✅   |     ✅     |
 | `schnorrKeygen`                     |                |   ✅  |                 |        |            |
-| `encrypt`                           |                |   ✅  |                 |        |            |
-| `sumCts` / `addCt` / `scalarMulCt`  |                |   ✅  |                 |        |  (if needed) |
-| `seedBallotTranscript`              |                |   ✅  |   (internal)    |        |            |
-| `rangeCandidates`                   |                |   ✅  |   (internal)    |        |            |
-| `proveOR`                           |                |   ✅  |                 |        |            |
-| `proveBudgetExact` / `…AtMost`      |                |   ✅  |                 |        |            |
-| `encodeBallotValidityProof`         |                |   ✅  |                 |        |            |
-| `canonicalBallotMessage`            |                |   ✅  |   (internal)    |        |            |
-| `schnorrSign` / `encodeSchnorr`     |                |   ✅  |                 |        |            |
+| `buildBallot` (wrapper)             |                |   ✅  |                 |        |            |
 | `verifyBallot`                      |                |       |       ✅        |        |            |
 | `Transcript` (constructor)          |                |       |                 |   ✅   |     ✅     |
 | `partialDecrypt`                    |                |       |                 |   ✅   |            |
-| `verifyDecryptionShare`             |                |       |                 |        |     ✅     |
-| `combineShares`                     |                |       |                 |        |     ✅     |
-| `buildBabyStepTable`                |                |       |                 |        |     ✅     |
-| `recoverDiscreteLog` / `…WithTable` |                |       |                 |        |     ✅     |
+| `recoverTally` (wrapper)            |                |       |                 |        |     ✅     |
 
-Everything else exported from `@shutter-network/shutter-voting-sdk` (the
-`G1Point` / `G2Point` types, `DLEQProof` / `ORProof` types, `encodeDLEQ` /
-`decodeDLEQ`) is supporting surface for the above calls — no actor invokes
-them directly in the happy path.
+Primitives still exported for vector generation / audits / bespoke flows
+(none required on the happy path):
+
+| Primitive                                              | Composed inside                                     |
+| ------------------------------------------------------ | --------------------------------------------------- |
+| `encrypt`, `addCt`, `scalarMulCt`, `sumCts`            | `buildBallot`                                       |
+| `seedBallotTranscript`, `rangeCandidates`              | `buildBallot`, `verifyBallot`                       |
+| `proveOR`, `proveBudgetExact`, `proveBudgetAtMost`     | `buildBallot`                                       |
+| `encodeBallotValidityProof`, `canonicalBallotMessage`  | `buildBallot`                                       |
+| `schnorrSign`, `encodeSchnorr`                         | `buildBallot`                                       |
+| `verifyDecryptionShare`                                | `recoverTally`                                      |
+| `combineShares`                                        | `recoverTally`                                      |
+| `buildBabyStepTable`, `recoverDiscreteLogWithTable`    | `recoverTally`                                      |
+| `recoverDiscreteLog`                                   | (single-shot equivalent of the WithTable pair)      |
+| `encodeDLEQ`, `decodeDLEQ`                             | (auditor-side share inspection)                    |
+
+The `G1Point` / `G2Point` / `Ciphertext` / proof-record types are surface
+for the inputs and outputs of every call above.
