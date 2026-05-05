@@ -75,6 +75,10 @@ on-chain constants that every other actor reads. Those constants are:
 
 The Election Authority itself calls **no SDK functions**.
 
+> The Vote Registry / Vote Proxy layer (out of SDK scope) **must reject
+> duplicate `pseudonym` submissions**. `verifyBallot` only checks one
+> ballot at a time and does not maintain any cross-ballot state.
+
 ---
 
 ## 2. Voter (frontend / client)
@@ -217,13 +221,6 @@ if (!result.ok) {
 - The budget proof verifies on the homomorphic `ctSum` (Variant A) or on
   `ĉ = Σ_j Σ_k 2^k · c_{j,k}` (Variant B).
 - The Schnorr signature verifies against `vk` and `keccak256(canonicalBallotMessage(...))`.
-
-### What `verifyBallot` does **not** do
-
-- It does not verify keyper shares (the tally aggregator handles that).
-- It does not pairing-check anything — no `verifyPairing` pass exists in this SDK.
-- It does not check that `pseudonym` has not voted twice — the caller-supplied
-  registry layer must enforce that.
 
 ---
 

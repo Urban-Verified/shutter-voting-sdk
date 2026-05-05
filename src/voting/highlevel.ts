@@ -125,11 +125,25 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
       `buildBallot: votes.length (${votes.length}) != params.numCandidates (${params.numCandidates})`,
     );
   }
+
+  // Variant B: enforce d === ⌈log₂(B+1)⌉ exactly, mirroring verifyBallot.
+  // Catches misconfigured params at the prover side instead of producing a
+  // ballot every verifier rejects.
   if (params.variant === 'B') {
     if (params.d === undefined || params.d <= 0) {
       throw new Error('buildBallot: Variant B requires positive params.d');
     }
-    const limit = 1n << BigInt(params.d);
+    const expectedD = Math.ceil(Math.log2(params.budget + 1));
+    if (params.d !== expectedD) {
+      throw new Error(
+        `buildBallot: Variant B d (${params.d}) must equal ⌈log₂(B+1)⌉ = ${expectedD}`,
+      );
+    }
+  }
+
+  // Per-component bounds on each vote.
+  if (params.variant === 'B') {
+    const limit = 1n << BigInt(params.d!);
     for (let j = 0; j < votes.length; j++) {
       const v = votes[j]!;
       if (v < 0n || v >= limit) {
@@ -148,6 +162,36 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
         );
       }
     }
+  }
+
+  // Aggregate-vote bound. `mode === 'exact'` requires Σ votes == B; `atMost`
+  // requires Σ votes ≤ B. Without this check, a vote vector that violates
+  // the budget would still encrypt fine, the budget proof would fail at the
+  // prover OR (worse) decode silently and be rejected by the verifier — the
+  // caller never learns the input was wrong.
+  const B = BigInt(params.budget);
+  let voteSum = 0n;
+  for (let j = 0; j < votes.length; j++) voteSum += votes[j]!;
+  if (params.mode === 'exact') {
+    if (voteSum !== B) {
+      throw new Error(
+        `buildBallot: mode='exact' requires Σvotes == ${B}, got ${voteSum}`,
+      );
+    }
+  } else {
+    if (voteSum > B) {
+      throw new Error(
+        `buildBallot: mode='atMost' requires Σvotes ≤ ${B}, got ${voteSum}`,
+      );
+    }
+  }
+
+  // Verify (sk, vk) are a matched pair: vk == sk · P₁. Catches a developer-
+  // mistake class (mismatched keypair, swapped voters) at construction time
+  // rather than producing a ballot whose Schnorr signature fails at the
+  // verifier.
+  if (G1Point.generator().mul(sk).equals(vk) === false) {
+    throw new Error('buildBallot: vk does not match sk · P₁ (mismatched keypair)');
   }
 
   // 1. Encrypt.
