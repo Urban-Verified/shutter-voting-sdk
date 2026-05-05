@@ -120,6 +120,10 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     wrAttestation,
   } = args;
 
+  if (mpk.isIdentity()) {
+    throw new Error('buildBallot: mpk is the identity — rejected (would reveal vote values)');
+  }
+
   if (votes.length !== params.numCandidates) {
     throw new Error(
       `buildBallot: votes.length (${votes.length}) != params.numCandidates (${params.numCandidates})`,
