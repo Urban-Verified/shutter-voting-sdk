@@ -24,21 +24,51 @@ import { SCALAR_BYTES, bigIntToBytesBE, modQ } from './field';
  * without this registry, long-running consumers — keypers, tally
  * aggregators, bench suites — exhaust the heap after a few thousand ops.
  *
- * `blst.destroy(inner)` calls the Emscripten-generated `__destroy__()`
- * and removes the object from the wrapper cache so its JS side can
- * collect too. Any failure at finalisation time is swallowed — by then
- * the module may be tearing down and there's nothing to report to.
+ * We do NOT use `blst.destroy(inner)` here because of a bug in the
+ * Emscripten-generated `__destroy__`:
+ *
+ *   P2.prototype.__destroy__ = function() {
+ *     _P2__destroy__0(this.ptr);   // calls WASM destructor
+ *     this.ptr = 0;                // zeroes the pointer — happens BEFORE …
+ *   };
+ *   function destroy(obj) {
+ *     obj.__destroy__();
+ *     delete getCache(obj.__class__)[obj.ptr]; // … reads ptr here — always 0!
+ *   }
+ *
+ * Because `obj.ptr` is 0 by the time `destroy` tries to clear the cache,
+ * it deletes `cache[0]` instead of `cache[originalPtr]`. The original
+ * entry persists forever. When the WASM allocator reuses `originalPtr` for
+ * a new object, `wrapPointer(originalPtr, klass)` returns the stale
+ * wrapper (with `ptr = 0`). Any WASM call on that wrapper uses address 0,
+ * producing garbage results — the nondeterministic VALID/INVALID bug.
+ *
+ * Fix: capture `ptr` and the class's prototype at registration time, then
+ * in the callback call `__destroy__` with the original pointer and delete
+ * the correct cache entry via `klass.__cache__[ptr]`.
  */
-const blstRegistry = new FinalizationRegistry<object>((inner) => {
+type BlstHeld = {
+  readonly ptr: number;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly klass: { __cache__?: Record<number, object>; prototype: { __destroy__(): void } };
+};
+
+const blstRegistry = new FinalizationRegistry<BlstHeld>(({ ptr, klass }) => {
   try {
-    (blst() as unknown as { destroy: (o: object) => void }).destroy(inner);
+    // Call __destroy__ with the original (pre-zero) pointer.
+    klass.prototype.__destroy__.call({ ptr });
+    // Delete the correct cache entry — Emscripten's own destroy() would
+    // delete cache[0] here due to the ptr-zeroing bug described above.
+    if (klass.__cache__) delete klass.__cache__[ptr];
   } catch {
     // Module tear-down or already-destroyed; nothing useful to do here.
   }
 });
 
 function trackPoint<T extends object>(wrapper: object, inner: T): T {
-  blstRegistry.register(wrapper, inner);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const held = inner as any;
+  blstRegistry.register(wrapper, { ptr: held.ptr as number, klass: held.__class__ });
   return inner;
 }
 
@@ -55,8 +85,13 @@ function blstScalar(s: bigint) {
 }
 
 function destroyWasm(obj: object): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const held = obj as any;
+  const ptr: number = held.ptr;
+  const klass = held.__class__;
   try {
-    (blst() as unknown as { destroy: (o: object) => void }).destroy(obj);
+    klass.prototype.__destroy__.call({ ptr });
+    if (klass.__cache__) delete klass.__cache__[ptr];
   } catch {
     // best-effort — same rationale as the registry callback.
   }
@@ -72,7 +107,11 @@ export class G1Point {
   }
 
   static generator(): G1Point {
-    return new G1Point(blst().P1.generator());
+    // .dup() returns an owned heap copy — never pass the static generator pointer
+    // directly to the G1Point constructor, because trackPoint() would register it
+    // with FinalizationRegistry and blst().destroy() would free the WASM static
+    // constant, corrupting all subsequent curve operations.
+    return new G1Point(blst().P1.generator().dup());
   }
 
   static identity(): G1Point {
@@ -146,7 +185,9 @@ export class G2Point {
   }
 
   static generator(): G2Point {
-    return new G2Point(blst().P2.generator());
+    // .dup() — same rationale as G1Point.generator(): avoid registering the
+    // static generator pointer with FinalizationRegistry.
+    return new G2Point(blst().P2.generator().dup());
   }
 
   static identity(): G2Point {
