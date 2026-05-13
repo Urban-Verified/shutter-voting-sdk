@@ -4,8 +4,6 @@ TypeScript SDK for client-side encrypted voting on the Shutter Network. Implemen
 
 Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/shutter-sdk); shares the BLST WASM layer.
 
-> **Status.** Pre-1.0; API is stabilising but not frozen. Phases P0–P9 of [docs/development-plan.md](docs/development-plan.md) are implemented: curve layer, ElGamal + Schnorr, Fiat–Shamir transcript, DLEQ / OR / budget proofs (both variants), ballot verification, partial-decrypt + BSGS tally, wire codecs, benchmarks, and committed cross-impl test vectors.
-
 ---
 
 ## Table of contents
@@ -56,13 +54,13 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
 ## Install & setup
 
 ```bash
-npm install @shutter-network/shutter-voting-sdk viem
+npm install @shutter-network/urban-verified-crypto viem
 ```
 
 `viem` is used for `keccak256`. The SDK depends on a BLST WASM build; it must be initialised once at startup before any curve or proof call:
 
 ```ts
-import { initCurves } from '@shutter-network/shutter-voting-sdk';
+import { initCurves } from '@shutter-network/urban-verified-crypto';
 
 await initCurves();
 ```
@@ -83,7 +81,7 @@ my-app/
 ```ts
 export default defineConfig({
   optimizeDeps: {
-    exclude: ['@shutter-network/shutter-voting-sdk'],
+    exclude: ['@shutter-network/urban-verified-crypto'],
   },
 });
 ```
@@ -107,7 +105,7 @@ A Munich-style ballot passes through these stages:
 All exports below come from the package root:
 
 ```ts
-import { /* … */ } from '@shutter-network/shutter-voting-sdk';
+import { /* … */ } from '@shutter-network/urban-verified-crypto';
 ```
 
 ### Curve primitives
