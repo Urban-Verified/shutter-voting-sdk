@@ -1,13 +1,16 @@
 {
-  "name": "@shutter-network/shutter-voting-sdk",
-  "version": "0.0.0",
+  "name": "@shutter-network/urban-verified-crypto",
+  "version": "0.1.0",
   "description": "TypeScript SDK for client-side encrypted voting on the Shutter Network: linearly homomorphic threshold ElGamal over BLS12-381 with vote-validity and decryption-share zero-knowledge proofs.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
-    "import": "./dist/index.mjs",
-    "require": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
   },
   "scripts": {
     "test": "jest",
@@ -17,13 +20,20 @@
   },
   "repository": {
     "type": "git",
-    "url": "github.com/shutter-network/shutter-voting-sdk"
+    "url": "https://github.com/Urban-Verified/shutter-voting-sdk.git"
   },
-  "author": "shutter-network",
+  "homepage": "https://github.com/Urban-Verified/shutter-voting-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Urban-Verified/shutter-voting-sdk/issues"
+  },
+  "author": "Shutter Network",
   "license": "ISC",
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "fast-check": "^4.7.0",
