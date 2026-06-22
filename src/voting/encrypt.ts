@@ -25,9 +25,14 @@ export function encrypt(
   mpk: G2Point,
   r: bigint = randomScalar(),
 ): { ct: Ciphertext; r: bigint } {
-  const P2 = G2Point.generator();
-  const c1 = P2.mul(r);
-  const c2 = mpk.mul(r).add(P2.mul(modQ(m)));
+  const P2   = G2Point.generator();
+  const c1   = P2.mul(r);
+  const mpkR = mpk.mul(r);
+  const P2m  = P2.mul(modQ(m));
+  const c2   = mpkR.add(P2m);
+  mpkR.destroyWasm();
+  P2m.destroyWasm();
+  P2.destroyWasm();
   return { ct: { c1, c2 }, r };
 }
 
@@ -46,7 +51,15 @@ export function sumCts(cts: readonly Ciphertext[]): Ciphertext {
   if (cts.length === 0) {
     return { c1: G2Point.identity(), c2: G2Point.identity() };
   }
-  let acc = cts[0]!;
-  for (let i = 1; i < cts.length; i++) acc = addCt(acc, cts[i]!);
+  // Start from the first pair via addCt so every acc we hold is our own
+  // allocation and can be freed when superseded.
+  if (cts.length === 1) return cts[0]!;
+  let acc = addCt(cts[0]!, cts[1]!);
+  for (let i = 2; i < cts.length; i++) {
+    const prev = acc;
+    acc = addCt(prev, cts[i]!);
+    prev.c1.destroyWasm();
+    prev.c2.destroyWasm();
+  }
   return acc;
 }

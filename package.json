@@ -1,6 +1,6 @@
 {
   "name": "@shutter-network/urban-verified-crypto",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TypeScript SDK for client-side encrypted voting on the Shutter Network: linearly homomorphic threshold ElGamal over BLS12-381 with vote-validity and decryption-share zero-knowledge proofs.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -14,7 +14,8 @@
   },
   "scripts": {
     "test": "jest",
-    "bench": "NODE_OPTIONS='--expose-gc' jest --config benchmarks/bench.config.js",
+    "bench": "node --expose-gc ./node_modules/.bin/jest --config benchmarks/bench.config.js",
+    "bench:wasm": "node --expose-gc ./node_modules/.bin/ts-node --transpile-only benchmarks/wasm-heap-verify-stress.ts",
     "gen-vectors": "ts-node scripts/gen-vectors.ts",
     "build": "tsup && cp src/crypto/blst/blst.wasm dist/blst.wasm"
   },
@@ -27,7 +28,7 @@
     "url": "https://github.com/Urban-Verified/shutter-voting-sdk/issues"
   },
   "author": "Shutter Network",
-  "license": "ISC",
+  "license": "MIT",
   "files": [
     "dist"
   ],

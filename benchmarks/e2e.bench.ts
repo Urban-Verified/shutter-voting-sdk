@@ -1,9 +1,12 @@
 /**
  * Full-scale HL_ARC end-to-end benchmark: the dev-plan §7.4 shape of
- * `n=5, t=2, ℓ=15, B=10, p=100`. Mirrors tests/voting.e2e.test.ts but
- * at the spec's voter count — too slow for the regular `npm test`
- * suite, and pushes the blst WASM heap hard enough that we aggregate
+ * `n=5, t=2, ℓ=15, B=10`. Mirrors tests/voting.e2e.test.ts but at
+ * larger voter counts — too slow for the regular `npm test` suite, and
+ * pushes the blst WASM heap hard enough that we aggregate ciphertexts
  * incrementally rather than retaining every ballot.
+ *
+ * Voter count is configurable: set BENCH_P env var to override the
+ * default of 10. Full spec run: `BENCH_P=100 npm run bench`.
  *
  * Reports three headline numbers:
  *   - total prove + Vote-Proxy-verify wall-clock across p voters
@@ -39,21 +42,19 @@ jest.setTimeout(900_000);
 
 const accept = () => true;
 
+const BENCH_P = Number(process.env.BENCH_P ?? 10);
+
 // The vendored blst.wasm is compiled with `INITIAL_MEMORY=16MB` and no
-// `ALLOW_MEMORY_GROWTH`, so the full p=100 scenario cannot run to
-// completion in a single Node process today (it OOMs around voter 10
-// because each ballot's prove step allocates several MB of transient
-// WASM points that can't be freed until the surrounding JS stack
-// unwinds and the `FinalizationRegistry` in `src/crypto/curve.ts` can
-// actually fire). The test stays here as a living target for when we
-// rebuild blst with memory growth.
-describe.skip('HL_ARC end-to-end (full scale)', () => {
-  it('n=5, t=2, ℓ=15, B=10, p=100 — Variant A', () => {
+// `ALLOW_MEMORY_GROWTH`. The fix in `src/crypto/curve.ts` (Jun 2026)
+// eliminates the per-ballot generator leak and adds explicit destroyWasm()
+// calls throughout, so p=100 at ℓ=15, B=10 now completes without OOM.
+describe('HL_ARC end-to-end (full scale)', () => {
+  it(`n=5, t=2, ℓ=15, B=10, p=${BENCH_P} — Variant A`, () => {
     const n = 5;
     const t = 2;
     const ℓ = 15;
     const B = 10;
-    const p = 100;
+    const p = BENCH_P;
 
     const dkg = simulateDKG(t, n);
     const electionId = new Uint8Array(32).fill(0xe1);
@@ -111,11 +112,10 @@ describe.skip('HL_ARC end-to-end (full scale)', () => {
         ctSum[j] = ctSum[j] === null ? ct : addCt(ctSum[j]!, ct);
       }
 
-      // Force JS GC so blst.wasm point handles get finalised and the
-      // underlying WASM memory reclaimed. Without this the 16MB heap
-      // fills after ~20 voters regardless of JS-side reference counts.
-      // Requires `node --expose-gc`; the bench script in package.json
-      // wires it up via NODE_OPTIONS.
+      // GC between voters to reclaim any GC-dependent orphaned G2 points
+      // from the tally accumulation (addCt intermediates). Requires
+      // `node --expose-gc`; the bench script in package.json passes it
+      // directly to node.
       if (typeof (globalThis as { gc?: () => void }).gc === 'function') {
         (globalThis as { gc: () => void }).gc();
       }
@@ -154,7 +154,7 @@ describe.skip('HL_ARC end-to-end (full scale)', () => {
 
     // eslint-disable-next-line no-console
     console.log(
-      `\nHL_ARC end-to-end (n=${n}, t=${t}, ℓ=${ℓ}, B=${B}, p=${p}):\n` +
+      `\nHL_ARC end-to-end (n=${n}, t=${t}, ℓ=${ℓ}, B=${B}, p=${p}; set BENCH_P to override):\n` +
         `  prove+verify total : ${(proveVerifyMs / 1000).toFixed(1)} s   (≈ ${(proveVerifyMs / p).toFixed(0)} ms/voter)\n` +
         `  threshold decrypt  : ${(decryptMs / 1000).toFixed(2)} s   (${ℓ} candidates, t+1=${subset.length} shares)\n` +
         `  zkProof size       : ${zkProofSize} bytes`,
