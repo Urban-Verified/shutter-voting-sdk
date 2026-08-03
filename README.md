@@ -411,3 +411,27 @@ npm run build         # tsup + copies blst.wasm into dist/
 - Munich *Personalratswahl* cryptographic protocol specification (v0.3).
 - Potential Extensions document (Variant B, binary decomposition, WR-Server integration).
 - [docs/development-plan.md](docs/development-plan.md) — phase-by-phase implementation plan, deviations, and rationale.
+
+---
+
+## Licence
+
+Copyright (C) 2025-2026 Brainbot GmbH
+
+This SDK is licensed under the **GNU Affero General Public License v3.0 only**
+(`AGPL-3.0-only`) — see [LICENSE](LICENSE).
+
+Versions **0.1.2 and earlier were released under the MIT licence**. That grant is
+irrevocable for those versions; the change to AGPL-3.0-only applies from **0.2.0**
+onwards.
+
+This project is a fork of [`shutter-network/shutter-sdk`](https://github.com/shutter-network/shutter-sdk).
+Code inherited from upstream was received under MIT, and its original copyright and
+permission notice is retained in [LICENSE.MIT](LICENSE.MIT) as MIT requires.
+
+### Third-party components
+
+The bundled BLS12-381 library **blst** ([supranational/blst](https://github.com/supranational/blst))
+is **Apache-2.0** licensed and is *not* covered by the AGPL — see
+[third_party/blst/LICENSE](third_party/blst/LICENSE). Full attribution is in
+[NOTICE](NOTICE).

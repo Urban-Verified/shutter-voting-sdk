@@ -1,0 +1,28 @@
+Copyright (C) 2025-2026 Brainbot GmbH
+Licensed under AGPL-3.0-only — see LICENSE.
+
+This product includes software developed by third parties.
+The components listed below are NOT covered by the AGPL-3.0-only licence in
+LICENSE; each remains under its own licence, reproduced at the path given.
+
+--------------------------------------------------------------------------------
+blst (BLS12-381 signature library)
+--------------------------------------------------------------------------------
+Files:    src/crypto/blst/blst.js
+          src/crypto/blst/blst.wasm
+Upstream: https://github.com/supranational/blst
+Licence:  Apache-2.0 — see third_party/blst/LICENSE
+
+blst.js is Emscripten-generated glue code wrapping the compiled blst library;
+blst.wasm is the compiled library itself. Portions of the Emscripten runtime
+embedded in blst.js are additionally MIT-licensed (Emscripten, University of
+Illinois / MIT).
+
+--------------------------------------------------------------------------------
+Upstream project
+--------------------------------------------------------------------------------
+This SDK is a fork of https://github.com/shutter-network/shutter-sdk.
+Code inherited from that project was received under the MIT licence and its
+original copyright and permission notice is retained in LICENSE.MIT, as MIT
+requires. MIT permits sublicensing, so the combined work is distributed under
+AGPL-3.0-only; the retained notice continues to cover the inherited portions.
