@@ -20,9 +20,30 @@ export type {
   PartialDecryption,
 } from './voting/types';
 
-export { encrypt, addCt, scalarMulCt, sumCts } from './voting/encrypt';
+export {
+  encrypt,
+  addCt,
+  scalarMulCt,
+  sumCts,
+  msmCt
+} from './voting/encrypt';
+export { msmG2 } from './crypto/msm';
 export { schnorrKeygen, schnorrSign, schnorrVerify } from './voting/schnorr';
 export { Transcript } from './voting/transcript';
+
+// Eligibility credentials. Needed by any deployment that mints or checks them
+// in JavaScript rather than through the Python eligibility service; the bytes
+// are an interop contract with that service, so they live here rather than
+// being re-derived per consumer.
+export {
+  ATTESTATION_LABEL,
+  attestationMessage,
+  legacyAttestationMessage,
+  signAttestation,
+  verifyAttestation,
+  verifyAttestationSig,
+} from './voting/attestation';
+export type { Attestation, AttestationScheme } from './voting/attestation';
 
 // Voter-side proof construction. Verifiers use `verifyBallot` (below); the
 // bare `verifyDLEQ`/`verifyOR`/`verifyBudget*` primitives are internal.
@@ -57,7 +78,15 @@ export type {
 // aggregator flows into one call. The lower-level primitives above
 // remain exported for vector generation, audits, and bespoke
 // aggregation paths.
-export { buildBallot, recoverTally } from './voting/highlevel';
+export {
+  buildBallot,
+  recoverTally,
+  verifyTallyAgainstTotals,
+} from './voting/highlevel';
+export type {
+  VerifyTallyArgs,
+  VerifyTallyResult,
+} from './voting/highlevel';
 export type { BuildBallotArgs, RecoverTallyArgs } from './voting/highlevel';
 
 export {

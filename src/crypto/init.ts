@@ -15,6 +15,14 @@ export async function initCurves(): Promise<void> {
       });
       blstInstance = blst as Blst;
     })();
+    // Clear the cached promise on failure. Without this a single transient fault --
+    // a fetch that lost the network, a script blocked once -- is remembered forever
+    // and every later call re-throws the same error without retrying, so the only
+    // recovery is a page reload. Success keeps the memo via `blstInstance` above.
+    initPromise = initPromise.catch((err) => {
+      initPromise = null;
+      throw err;
+    });
   }
   await initPromise;
 }
