@@ -38,9 +38,6 @@ const ELECTION_ID_BYTES = 32;
 const PSEUDONYM_BYTES = 32;
 const VK_BYTES = 48;
 
-/** Which credential scheme an attestation uses. */
-export type AttestationScheme = 'ATTESTATION_V1' | 'ATTESTATION_LEGACY';
-
 /** The credential as it travels on the wire, bytes already decoded. */
 export interface Attestation {
   electionId: Uint8Array; // 32
@@ -49,8 +46,6 @@ export interface Attestation {
   weight: bigint;
   nonce: bigint;
   signature: Uint8Array; // 80 — R ‖ s
-  /** Absent means `ATTESTATION_V1`, matching the JSON codec's default. */
-  scheme?: AttestationScheme;
 }
 
 function assertFieldSizes(
@@ -105,22 +100,6 @@ export function attestationMessage(
 }
 
 /**
- * The weightless legacy preimage digest: `keccak256(electionId ‖ pseudonym ‖ vk)`.
- *
- * No domain separator and no length prefixes — that is the concept-doc-locked
- * construction, carried for interop with existing Munich-style deployments. A
- * legacy credential authorizes weight 1 and nothing else.
- */
-export function legacyAttestationMessage(
-  electionId: Uint8Array,
-  pseudonym: Uint8Array,
-  vk: Uint8Array,
-): Uint8Array {
-  assertFieldSizes(electionId, pseudonym, vk);
-  return keccak256(concatBytes([electionId, pseudonym, vk]), 'bytes');
-}
-
-/**
  * Issue an `ATTESTATION_V1` signature (80-byte `R ‖ s`).
  *
  * `eligibilitySk` is the issuer's Schnorr-G₁ secret; `eligibilityVk` is the
@@ -131,7 +110,7 @@ export function legacyAttestationMessage(
 export function signAttestation(
   eligibilitySk: bigint,
   eligibilityVk: G1Point,
-  attestation: Omit<Attestation, 'signature' | 'scheme'>,
+  attestation: Omit<Attestation, 'signature'>,
   k?: bigint,
 ): Uint8Array {
   const msg = attestationMessage(
@@ -167,21 +146,13 @@ export function verifyAttestationSig(
   let eligVk: G1Point | null = null;
   let sigR: G1Point | null = null;
   try {
-    const scheme = attestation.scheme ?? 'ATTESTATION_V1';
-    const msg =
-      scheme === 'ATTESTATION_LEGACY'
-        ? legacyAttestationMessage(
-            attestation.electionId,
-            attestation.pseudonym,
-            attestation.vk,
-          )
-        : attestationMessage(
-            attestation.electionId,
-            attestation.pseudonym,
-            attestation.vk,
-            attestation.weight,
-            attestation.nonce,
-          );
+    const msg = attestationMessage(
+      attestation.electionId,
+      attestation.pseudonym,
+      attestation.vk,
+      attestation.weight,
+      attestation.nonce,
+    );
     eligVk = G1Point.fromBytes(eligibilityKey);
     const sig = decodeSchnorr(attestation.signature);
     sigR = sig.R;
@@ -198,25 +169,19 @@ export function verifyAttestationSig(
  * Normative attestation verification — the mirror of Python
  * `geg.ports.eligibility.verify_attestation`.
  *
- * Beyond the signature it enforces that the credential binds the expected
- * election and that `1 <= weight <= maxWeight`, and that a legacy credential is
- * only accepted at weight 1. Returns `false`, never throws.
+ * Beyond the signature it enforces that the credential binds the expected election
+ * and that `weight >= 1`. Returns `false`, never throws.
  */
 export function verifyAttestation(
   eligibilityKey: Uint8Array,
   attestation: Attestation,
-  opts: { electionId: Uint8Array; maxWeight: bigint },
+  opts: { electionId: Uint8Array },
 ): boolean {
-  const { electionId, maxWeight } = opts;
+  const { electionId } = opts;
   if (attestation.electionId.length !== electionId.length) return false;
   for (let i = 0; i < electionId.length; i++) {
     if (attestation.electionId[i] !== electionId[i]) return false;
   }
-  if (attestation.weight < 1n || attestation.weight > maxWeight) return false;
-  const scheme = attestation.scheme ?? 'ATTESTATION_V1';
-  // Legacy credentials are weightless — they authorize weight 1 only.
-  if (scheme === 'ATTESTATION_LEGACY' && attestation.weight !== 1n) {
-    return false;
-  }
+  if (attestation.weight < 1n) return false;
   return verifyAttestationSig(eligibilityKey, attestation);
 }

@@ -32,7 +32,6 @@ function mpk(): G2Point {
   return G2Point.generator().mul(randomScalar());
 }
 
-const accept = () => true;
 
 describe('property — OR proof completeness', () => {
   it('verifyOR accepts honest proof for random m ∈ {0..B}', async () => {
@@ -88,14 +87,14 @@ describe('property — verifyBallot on random valid vote vectors', () => {
           .filter(([a, b, c]) => a + b + c <= params.budget),
         (triple) => {
           const votes = triple.map((v) => BigInt(v));
-          const { inputs } = buildBallot({
+          const { inputs, eligibilityKey } = buildBallot({
             mpk: pk,
             electionId: new Uint8Array(32).fill(0x11),
             pseudonym: new Uint8Array(32).fill(0x22),
             votes,
             params,
           });
-          return verifyBallot(inputs, params, pk, accept).ok === true;
+          return verifyBallot(inputs, params, pk, eligibilityKey).ok === true;
         },
       ),
       { numRuns: 8 },
@@ -114,7 +113,7 @@ describe('property — 1-bit flip always rejects', () => {
   it('flipping any bit in a ciphertext or zkProof byte is rejected', async () => {
     const pk = mpk();
     // Build one valid ballot up front; reuse it across all flip targets.
-    const { inputs } = buildBallot({
+    const { inputs, eligibilityKey } = buildBallot({
       mpk: pk,
       electionId: new Uint8Array(32).fill(0xaa),
       pseudonym: new Uint8Array(32).fill(0xbb),
@@ -123,7 +122,7 @@ describe('property — 1-bit flip always rejects', () => {
     });
 
     // Sanity: the base ballot verifies.
-    expect(verifyBallot(inputs, params, pk, accept).ok).toBe(true);
+    expect(verifyBallot(inputs, params, pk, eligibilityKey).ok).toBe(true);
 
     const totalCipherBytes = inputs.ciphertexts.length * 2 * 96;
     const zkLen = inputs.zkProof.length;
@@ -156,7 +155,7 @@ describe('property — 1-bit flip always rejects', () => {
                 { ...inputs, ciphertexts: cts },
                 params,
                 pk,
-                accept,
+                eligibilityKey,
               ).ok === false
             );
           } else {
@@ -164,7 +163,7 @@ describe('property — 1-bit flip always rejects', () => {
             const z = new Uint8Array(inputs.zkProof);
             z[idx]! ^= 1 << bit;
             return (
-              verifyBallot({ ...inputs, zkProof: z }, params, pk, accept)
+              verifyBallot({ ...inputs, zkProof: z }, params, pk, eligibilityKey)
                 .ok === false
             );
           }

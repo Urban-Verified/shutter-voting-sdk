@@ -41,6 +41,7 @@ import {
   proveOR,
 } from './proofs';
 import { schnorrSign } from './schnorr';
+import type { Attestation } from './attestation';
 import { Transcript } from './transcript';
 import type {
   BallotValidityProof,
@@ -81,8 +82,14 @@ export interface BuildBallotArgs {
   votes: bigint[];
   /** Election parameters — must match the verifier's exactly. */
   params: BallotVerifyParams;
-  /** Opaque WR-Server attestation bytes; passed through unchanged. */
-  wrAttestation: Uint8Array;
+  /**
+   * The eligibility credential, already issued and signed by the eligibility service.
+   *
+   * Required, and covered by the voter's signature — which is the point of v2. The
+   * credential must have been minted for this `vk` and `pseudonym`; `verifyBallot`
+   * rejects one that names anything else.
+   */
+  attestation: Attestation;
 }
 
 /**
@@ -117,7 +124,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     vk,
     votes,
     params,
-    wrAttestation,
+    attestation,
   } = args;
 
   if (mpk.isIdentity()) {
@@ -351,6 +358,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     pseudonym,
     ciphertexts: ciphertextBytes,
     zkProof,
+    attestation,
   });
   const sig = schnorrSign(sk, vk, keccak256(preimage, 'bytes'));
   const voterSignature = encodeSchnorr(sig);
@@ -363,7 +371,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     ciphertexts: ciphertextBytes,
     zkProof,
     voterSignature,
-    wrAttestation,
+    attestation,
   };
 }
 

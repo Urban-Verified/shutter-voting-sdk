@@ -27,7 +27,14 @@ describe('high-level ballot wrapper', () => {
           mode: 'exact',
           variant: 'A',
         },
-        wrAttestation: new Uint8Array([0x01]),
+        attestation: {
+          electionId: new Uint8Array(32).fill(0xe1),
+          pseudonym: new Uint8Array(32).fill(0xa1),
+          vk: new Uint8Array(48).fill(0x33),
+          weight: 1n,
+          nonce: 1n,
+          signature: new Uint8Array(80),
+        },
       }),
     ).toThrow(/mpk is the identity/);
   });

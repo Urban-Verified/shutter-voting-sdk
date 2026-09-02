@@ -33,6 +33,7 @@ import {
   verifyOR,
 } from './proofs';
 import { schnorrVerify } from './schnorr';
+import { verifyAttestation, type Attestation } from './attestation';
 import { Transcript } from './transcript';
 import type {
   BallotValidityProof,
@@ -41,8 +42,46 @@ import type {
 
 const encoder = new TextEncoder();
 
-const BALLOT_LABEL = 'SHUTTER-VOTE-BALLOT-v1';
-const CANONICAL_HEADER = encoder.encode(BALLOT_LABEL);
+/**
+ * v2 folds the eligibility credential into the signed ballot message.
+ *
+ * Under v1 the credential could not live in the ballot — the slot for it was an
+ * opaque `wrAttestation` blob that was not covered by this message — so consumers
+ * carried it alongside and bound it with a *second* Schnorr signature over a separate
+ * `SHUTTER-VOTE-BINDING-v1` transcript. That transcript ended up implemented four
+ * times across two languages, all of which had to agree byte-for-byte.
+ *
+ * Bumping the label is what makes the change detectable: a v1 signature checked
+ * against a v2 message does not fail informatively, it just returns false, which reads
+ * as "wrong voter" rather than "wrong format". Verifiers should re-check against v1 on
+ * the failure path and say so.
+ */
+const BALLOT_MESSAGE_LABEL = 'SHUTTER-VOTE-BALLOT-v2';
+const CANONICAL_HEADER = encoder.encode(BALLOT_MESSAGE_LABEL);
+
+/**
+ * The Fiat–Shamir transcript label for the range/budget proofs — a **different domain**
+ * from the signed message above, not an older version of it.
+ *
+ * These were one constant. Bumping the message to v2 therefore changed every proof's
+ * challenge as a side effect, which is a bug: the two version for unrelated reasons.
+ * The message changed because the credential moved inside it; the proof still proves
+ * the same statement over the same public inputs and its domain never changed.
+ */
+const BALLOT_PROOF_TRANSCRIPT_LABEL = 'SHUTTER-VOTE-BALLOT-PROOF-v1';
+
+/** The superseded message format, for the v1 detection on the failure path only. */
+const BALLOT_MESSAGE_LABEL_V1 = 'SHUTTER-VOTE-BALLOT-v1';
+
+/**
+ * The three ballot domain separators, exported for the guard test that asserts they
+ * stay distinct. Only the first two are versions of each other.
+ */
+export const BALLOT_LABELS = {
+  message: BALLOT_MESSAGE_LABEL,
+  proofTranscript: BALLOT_PROOF_TRANSCRIPT_LABEL,
+  supersededMessage: BALLOT_MESSAGE_LABEL_V1,
+} as const;
 
 // ---------- Public input shapes ----------
 
@@ -59,7 +98,8 @@ export interface BallotInputs {
   ciphertexts: ReadonlyArray<readonly [Uint8Array, Uint8Array]>; // (C1, C2) pairs, each 96 bytes compressed G₂
   zkProof: Uint8Array; // output of encodeBallotValidityProof
   voterSignature: Uint8Array; // encodeSchnorr(sig) — 80 bytes
-  wrAttestation: Uint8Array; // opaque σ_WR — handed to the caller-supplied verifier
+  /** The eligibility credential, verified here and covered by `voterSignature`. */
+  attestation: Attestation;
 }
 
 /**
@@ -80,18 +120,13 @@ export type VerifyResult =
   | { ok: true }
   | { ok: false; reason: string };
 
-/**
- * Signature of the WR-Server attestation verifier. Out of SDK scope (the
- * WR-Server signature scheme is specified outside this spec), so the
- * caller supplies a closure. The SDK invokes it with everything the
- * attestation binds to in the voter-registration flow.
- */
-export type WRAttestationVerifier = (
-  electionId: Uint8Array,
-  pseudonym: Uint8Array,
-  vk: Uint8Array,
-  attestation: Uint8Array,
-) => boolean;
+/** Constant-time-enough byte comparison for fixed-size public values. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
+}
 
 // ---------- Canonical Schnorr preimage ----------
 
@@ -103,10 +138,24 @@ export type WRAttestationVerifier = (
  * invalidates every ballot.
  *
  * Layout:
- *   "SHUTTER-VOTE-BALLOT-v1" ‖ electionId ‖ pseudonym
+ *   "SHUTTER-VOTE-BALLOT-v2" ‖ electionId ‖ pseudonym
  *     ‖ u16 BE ciphertexts.length
  *     ‖ for each (C1, C2): C1 bytes ‖ C2 bytes      // already 96-byte compressed
  *     ‖ u32 BE zkProof.length ‖ zkProof
+ *     ‖ attestation.pseudonym ‖ attestation.vk       // 32 ‖ 48
+ *     ‖ u256 BE weight ‖ u256 BE nonce
+ *     ‖ u16 BE attestation.signature.length ‖ signature
+ *
+ * The credential's own `electionId` is not repeated — the message already opens with
+ * it, and `verifyBallot` rejects an attestation naming a different election.
+ *
+ * The issuer's **signature bytes are covered**, not just the credential's fields.
+ * Schnorr signing is randomized (`schnorrSign` draws `k` at random), so one set of
+ * fields has many valid signatures; leaving the bytes uncovered would let a relay swap
+ * one valid signature for another and keep the voter's signature valid. Semantically
+ * harmless, but it makes the envelope malleable — and the published ballot feed is
+ * re-aggregated byte-for-byte by auditors, and ballot digests are used as stable
+ * identifiers for duplicate detection and re-vote ordering. Both need the bytes fixed.
  *
  * The caller hashes the returned preimage (keccak256) before handing it
  * to `schnorrSign` / `schnorrVerify`.
@@ -116,6 +165,7 @@ export function canonicalBallotMessage(args: {
   pseudonym: Uint8Array;
   ciphertexts: ReadonlyArray<readonly [Uint8Array, Uint8Array]>;
   zkProof: Uint8Array;
+  attestation: Attestation;
 }): Uint8Array {
   if (args.electionId.length !== 32) {
     throw new Error(
@@ -132,6 +182,20 @@ export function canonicalBallotMessage(args: {
       throw new Error('canonicalBallotMessage: each ciphertext component must be 96 bytes');
     }
   }
+  const att = args.attestation;
+  if (att.pseudonym.length !== 32) {
+    throw new Error(
+      `canonicalBallotMessage: attestation.pseudonym must be exactly 32 bytes (got ${att.pseudonym.length})`,
+    );
+  }
+  if (att.vk.length !== 48) {
+    throw new Error(
+      `canonicalBallotMessage: attestation.vk must be exactly 48 bytes (got ${att.vk.length})`,
+    );
+  }
+  if (att.weight < 0n || att.nonce < 0n) {
+    throw new Error('canonicalBallotMessage: attestation weight/nonce must be non-negative');
+  }
   const n = args.ciphertexts.length;
   const size =
     CANONICAL_HEADER.length +
@@ -140,7 +204,13 @@ export function canonicalBallotMessage(args: {
     2 +
     n * (96 + 96) +
     4 +
-    args.zkProof.length;
+    args.zkProof.length +
+    32 + // attestation.pseudonym
+    48 + // attestation.vk
+    32 + // weight,  u256 BE
+    32 + // nonce,   u256 BE
+    2 + // u16 BE signature length
+    att.signature.length;
   const out = new Uint8Array(size);
   let o = 0;
   out.set(CANONICAL_HEADER, o);
@@ -163,7 +233,76 @@ export function canonicalBallotMessage(args: {
   out[o++] = (zpLen >>> 8) & 0xff;
   out[o++] = zpLen & 0xff;
   out.set(args.zkProof, o);
+  o += args.zkProof.length;
+
+  // ---- the eligibility credential (v2) ----
+  out.set(att.pseudonym, o);
+  o += 32;
+  out.set(att.vk, o);
+  o += 48;
+  // Fixed 32-byte big-endian, not a minimal encoding: a variable-length integer would
+  // make the concatenation ambiguous without its own length prefix, and weight can
+  // legitimately exceed 2^53 now that voting power is uncapped.
+  writeU256BE(out, o, att.weight);
+  o += 32;
+  writeU256BE(out, o, att.nonce);
+  o += 32;
+  const sigLen = att.signature.length;
+  if (sigLen > 0xffff) {
+    throw new Error(`canonicalBallotMessage: attestation.signature too long (${sigLen})`);
+  }
+  out[o++] = (sigLen >>> 8) & 0xff;
+  out[o++] = sigLen & 0xff;
+  out.set(att.signature, o);
   return out;
+}
+
+/**
+ * The v1 ballot preimage — diagnostic only, never accepted.
+ *
+ * Its single caller is the failure path in `verifyBallot`, so that a ballot signed by
+ * a pre-v2 client is reported as a format mismatch rather than as an invalid
+ * signature. Deliberately a separate function rather than a flag on
+ * `canonicalBallotMessage`: a parameter that switches a signed format between
+ * versions is one mistaken argument away from accepting the old one.
+ */
+function preV1BallotMessage(inputs: BallotInputs): Uint8Array {
+  const header = encoder.encode(BALLOT_MESSAGE_LABEL_V1);
+  const n = inputs.ciphertexts.length;
+  const size =
+    header.length + 32 + 32 + 2 + n * 192 + 4 + inputs.zkProof.length;
+  const out = new Uint8Array(size);
+  let o = 0;
+  out.set(header, o);
+  o += header.length;
+  out.set(inputs.electionId, o);
+  o += 32;
+  out.set(inputs.pseudonym, o);
+  o += 32;
+  out[o++] = (n >>> 8) & 0xff;
+  out[o++] = n & 0xff;
+  for (const [c1, c2] of inputs.ciphertexts) {
+    out.set(c1, o);
+    o += 96;
+    out.set(c2, o);
+    o += 96;
+  }
+  const zpLen = inputs.zkProof.length;
+  out[o++] = (zpLen >>> 24) & 0xff;
+  out[o++] = (zpLen >>> 16) & 0xff;
+  out[o++] = (zpLen >>> 8) & 0xff;
+  out[o++] = zpLen & 0xff;
+  out.set(inputs.zkProof, o);
+  return out;
+}
+
+/** Big-endian 32-byte write, so weights past 2^53 survive the encoding. */
+function writeU256BE(out: Uint8Array, at: number, value: bigint): void {
+  let v = value;
+  for (let i = 31; i >= 0; i--) {
+    out[at + i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
 }
 
 // ---------- Transcript seeding (shared between prover and verifier) ----------
@@ -187,7 +326,7 @@ export function seedBallotTranscript(
   ciphertexts: readonly Ciphertext[],
   params: BallotVerifyParams,
 ): Transcript {
-  const t = new Transcript(BALLOT_LABEL);
+  const t = new Transcript(BALLOT_PROOF_TRANSCRIPT_LABEL);
   t.append('electionId', electionId);
   t.appendPoint('mpk', mpk);
   t.appendPoint('vk', vk);
@@ -222,7 +361,8 @@ export function verifyBallot(
   inputs: BallotInputs,
   params: BallotVerifyParams,
   mpk: G2Point,
-  verifyWRAttestation: WRAttestationVerifier,
+  /** Compressed G₁ public key of the eligibility issuer, 48 bytes. */
+  eligibilityKey: Uint8Array,
 ): VerifyResult {
   // Parameter validation. The codec serialises ℓ and B as u16BE, so 0xFFFF
   // is the natural hard ceiling. Anything larger could not round-trip the
@@ -326,16 +466,22 @@ export function verifyBallot(
       }
     }
 
-    // WR-Server attestation (caller-supplied).
-    if (
-      !verifyWRAttestation(
-        inputs.electionId,
-        inputs.pseudonym,
-        inputs.vk,
-        inputs.wrAttestation,
-      )
-    ) {
-      return { ok: false, reason: 'wrAttestation verification failed' };
+    // Eligibility credential. Verified here rather than by a caller-supplied
+    // predicate: the v1 hook was opaque enough that one consumer wired a constant
+    // `true` to it, which is a check that exists on paper and nowhere else.
+    if (!verifyAttestation(eligibilityKey, inputs.attestation, {
+      electionId: inputs.electionId,
+    })) {
+      return { ok: false, reason: 'attestation verification failed' };
+    }
+    // The credential must name *this* voter's ballot key. Without this a valid
+    // credential issued for another `vk` could be presented with this ballot: the
+    // signature would cover it, and it would still be a credential the issuer signed.
+    if (!bytesEqual(inputs.attestation.vk, inputs.vk)) {
+      return { ok: false, reason: 'attestation vk does not match the ballot vk' };
+    }
+    if (!bytesEqual(inputs.attestation.pseudonym, inputs.pseudonym)) {
+      return { ok: false, reason: 'attestation pseudonym does not match the ballot' };
     }
 
     // Decode zkProof.
@@ -468,9 +614,22 @@ export function verifyBallot(
       pseudonym: inputs.pseudonym,
       ciphertexts: inputs.ciphertexts,
       zkProof: inputs.zkProof,
+      attestation: inputs.attestation,
     });
     const msg = keccak256(preimage, 'bytes');
     if (!schnorrVerify(vk, msg, sig)) {
+      // Name a format mismatch as one. A signature made over the v1 message does not
+      // fail informatively against v2 — `schnorrVerify` just returns false, which
+      // reads as "wrong voter" and sends the reader after the key. Checking the v1
+      // preimage here costs one keccak on a path that has already failed.
+      if (schnorrVerify(vk, keccak256(preV1BallotMessage(inputs), 'bytes'), sig)) {
+        return {
+          ok: false,
+          reason:
+            'voter signature is over the pre-attestation ballot format ' +
+            '(SHUTTER-VOTE-BALLOT-v1); this ballot was built by an older client',
+        };
+      }
       return { ok: false, reason: 'signature invalid' };
     }
 

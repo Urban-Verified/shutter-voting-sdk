@@ -18,7 +18,6 @@ import {
   Attestation,
   attestationMessage,
   initCurves,
-  legacyAttestationMessage,
   signAttestation,
   verifyAttestation,
   verifyAttestationSig,
@@ -73,7 +72,7 @@ describe('ATTESTATION_V1', () => {
       const ok = verifyAttestation(
         eligVk.toBytes(),
         { ...fields, signature },
-        { electionId: fields.electionId, maxWeight: 10n },
+        { electionId: fields.electionId },
       );
       expect(ok).toBe(true);
     } finally {
@@ -114,20 +113,40 @@ describe('ATTESTATION_V1', () => {
     }
   });
 
-  it('rejects a weight above maxWeight before touching the signature', () => {
+  // The inverse of what this asserted while voting power was clamped: there is no
+  // upper bound on weight any more, matching geg. The bound had to be at least the
+  // largest legitimate holder to be usable, i.e. effectively the whole supply, at
+  // which point an issuer able to forge one weight could already forge a decisive
+  // one. Keeping the tally computable is the scale factor's job now.
+  it('accepts an arbitrarily large weight — there is no ceiling', () => {
     const { sk, vk: eligVk } = eligibility();
     try {
-      const fields = { ...base(), weight: 50n };
+      for (const weight of [50n, 10n ** 12n, (1n << 200n) - 1n]) {
+        const fields = { ...base(), weight };
+        const signature = signAttestation(sk, eligVk, fields, NONCE_K);
+        expect(
+          verifyAttestation(
+            eligVk.toBytes(),
+            { ...fields, signature },
+            { electionId: fields.electionId },
+          ),
+        ).toBe(true);
+      }
+    } finally {
+      eligVk.destroyWasm();
+    }
+  });
+
+  it('still rejects weight below 1', () => {
+    const { sk, vk: eligVk } = eligibility();
+    try {
+      const fields = { ...base(), weight: 1n };
       const signature = signAttestation(sk, eligVk, fields, NONCE_K);
-      // The signature itself is valid — only the ceiling rejects it.
-      expect(
-        verifyAttestationSig(eligVk.toBytes(), { ...fields, signature }),
-      ).toBe(true);
       expect(
         verifyAttestation(
           eligVk.toBytes(),
-          { ...fields, signature },
-          { electionId: fields.electionId, maxWeight: 10n },
+          { ...fields, signature, weight: 0n },
+          { electionId: fields.electionId },
         ),
       ).toBe(false);
     } finally {
@@ -144,7 +163,7 @@ describe('ATTESTATION_V1', () => {
         verifyAttestation(
           eligVk.toBytes(),
           { ...fields, signature },
-          { electionId: bytes(0x99, 32), maxWeight: 10n },
+          { electionId: bytes(0x99, 32) },
         ),
       ).toBe(false);
     } finally {
@@ -178,17 +197,6 @@ describe('ATTESTATION_V1', () => {
     ).toThrow(/vk must be 48 bytes/);
   });
 
-  it('the legacy digest is a bare concatenation, distinct from V1', () => {
-    const eid = bytes(0x11, 32);
-    const pseudo = bytes(0x22, 32);
-    const vk = someVk(0x1234n);
-    const legacy = legacyAttestationMessage(eid, pseudo, vk);
-    const v1 = attestationMessage(eid, pseudo, vk, 1n, 1n);
-    expect(Buffer.from(legacy).toString('hex')).not.toBe(
-      Buffer.from(v1).toString('hex'),
-    );
-  });
-
   /**
    * Known-answer test — the credential below was minted by the Python
    * implementation (`geg.crypto.attestation.sign_attestation`) and is carried in
@@ -217,7 +225,6 @@ describe('ATTESTATION_V1', () => {
         '90f40c1d2b7319ea5440eb0c3250b8db9db64270aa9841f8ce2556a7c786dc96' +
         '6e8d5f300848f4917aa88bf941882d4e09e6c30436dd0aee41a2607e2278e371' +
         '74799b1ceb0f10c8f00f4a667ef66e82',
-      maxWeight: 10n,
     };
 
     const attestation: Attestation = {
@@ -227,13 +234,11 @@ describe('ATTESTATION_V1', () => {
       weight: vector.weight,
       nonce: vector.nonce,
       signature: unhex(vector.signature),
-      scheme: 'ATTESTATION_V1',
     };
 
     expect(
       verifyAttestation(unhex(vector.eligibilityKey), attestation, {
         electionId: attestation.electionId,
-        maxWeight: vector.maxWeight,
       }),
     ).toBe(true);
   });

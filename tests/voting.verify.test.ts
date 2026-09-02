@@ -21,6 +21,9 @@ import {
   verifyBallot,
 } from '../src';
 import { randomScalar } from '../src/crypto/field';
+import { BALLOT_LABELS } from '../src/voting/verify';
+import { forgedCredential, testIssuer, type TestIssuer } from './lib/credential';
+import type { Attestation } from '../src/voting/attestation';
 
 beforeAll(async () => {
   await initCurves();
@@ -43,7 +46,8 @@ function buildBallot(args: {
   pseudonym: Uint8Array;
   votes: bigint[];
   params: BallotVerifyParams;
-  wrAttestation?: Uint8Array;
+  /** Override to test rejection; defaults to a credential this issuer signed. */
+  attestation?: Attestation;
 }): { inputs: BallotInputs; sk: bigint } {
   const { mpk, electionId, pseudonym, votes, params } = args;
   if (votes.length !== params.numCandidates) {
@@ -160,11 +164,15 @@ function buildBallot(args: {
     ct.c2.toBytes(),
   ]);
 
+  const attestation =
+    args.attestation ??
+    ISSUER.mint({ electionId, pseudonym, vk: vk.toBytes() });
   const preimage = canonicalBallotMessage({
     electionId,
     pseudonym,
     ciphertexts: ciphertextBytes,
     zkProof,
+    attestation,
   });
   const msg = keccak256(preimage, 'bytes');
   const sig = schnorrSign(sk, vk, msg);
@@ -177,7 +185,7 @@ function buildBallot(args: {
       ciphertexts: ciphertextBytes,
       zkProof,
       voterSignature: encodeSchnorr(sig),
-      wrAttestation: args.wrAttestation ?? new Uint8Array([0x01]),
+      attestation,
     },
     sk,
   };
@@ -190,8 +198,27 @@ function u16BE(n: number): Uint8Array {
   return o;
 }
 
-const accept = () => true;
-const reject = () => false;
+/**
+ * One issuer for the whole suite; ballots default to a credential it signed.
+ *
+ * Built in `beforeAll`, not at module scope: `testIssuer` touches the curve layer, and
+ * module initialisers run before `initCurves()` has been awaited.
+ */
+let ISSUER: TestIssuer;
+beforeAll(() => {
+  ISSUER = testIssuer();
+});
+afterAll(() => ISSUER?.destroy());
+
+/** Well-formed but unsigned: these tests exercise the encoding, not verification. */
+const ENCODING_ATT = {
+  electionId: new Uint8Array(32).fill(0x11),
+  pseudonym: new Uint8Array(32).fill(0x22),
+  vk: new Uint8Array(48).fill(0x33),
+  weight: 7n,
+  nonce: 3n,
+  signature: new Uint8Array(80).fill(0x44),
+};
 
 describe('canonicalBallotMessage', () => {
   it('is deterministic for identical inputs', () => {
@@ -205,6 +232,7 @@ describe('canonicalBallotMessage', () => {
         ],
       ],
       zkProof: new Uint8Array([1, 2, 3]),
+      attestation: ENCODING_ATT,
     };
     const a = canonicalBallotMessage(args);
     const b = canonicalBallotMessage(args);
@@ -222,6 +250,7 @@ describe('canonicalBallotMessage', () => {
         ],
       ],
       zkProof: new Uint8Array([1, 2, 3]),
+      attestation: ENCODING_ATT,
     };
     const variants = [
       { ...base, electionId: new Uint8Array(32).fill(0x12) },
@@ -250,6 +279,7 @@ describe('canonicalBallotMessage', () => {
         pseudonym: new Uint8Array(32),
         ciphertexts: [[new Uint8Array(95), new Uint8Array(96)]],
         zkProof: new Uint8Array(0),
+        attestation: ENCODING_ATT,
       }),
     ).toThrow(/96 bytes/);
   });
@@ -262,6 +292,7 @@ describe('canonicalBallotMessage', () => {
           pseudonym: new Uint8Array(32),
           ciphertexts: [],
           zkProof: new Uint8Array(0),
+          attestation: ENCODING_ATT,
         }),
       ).toThrow(/electionId.*32 bytes/);
     }
@@ -275,6 +306,7 @@ describe('canonicalBallotMessage', () => {
           pseudonym: new Uint8Array(len),
           ciphertexts: [],
           zkProof: new Uint8Array(0),
+          attestation: ENCODING_ATT,
         }),
       ).toThrow(/pseudonym.*32 bytes/);
     }
@@ -298,7 +330,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
     ciphertexts: [],
     zkProof: new Uint8Array(0),
     voterSignature: new Uint8Array(80),
-    wrAttestation: new Uint8Array(0),
+    attestation: ENCODING_ATT,
   });
 
   it('rejects non-integer numCandidates', () => {
@@ -307,7 +339,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       minimalInputs(),
       { ...validParams, numCandidates: 1.5 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r).toEqual({ ok: false, reason: 'numCandidates must be an integer' });
   });
@@ -315,7 +347,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
   it('rejects numCandidates below 1', () => {
     const { mpk } = trustedSetup();
     for (const n of [0, -1, -0x10000]) {
-      const r = verifyBallot(minimalInputs(), { ...validParams, numCandidates: n }, mpk, accept);
+      const r = verifyBallot(minimalInputs(), { ...validParams, numCandidates: n }, mpk, ISSUER.eligibilityKey);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.reason).toMatch(/numCandidates.*out of range/);
     }
@@ -327,7 +359,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       minimalInputs(),
       { ...validParams, numCandidates: 0x10000 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/numCandidates.*out of range/);
@@ -335,27 +367,27 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
 
   it('rejects non-integer budget', () => {
     const { mpk } = trustedSetup();
-    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 1.5 }, mpk, accept);
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 1.5 }, mpk, ISSUER.eligibilityKey);
     expect(r).toEqual({ ok: false, reason: 'budget must be an integer' });
   });
 
   it('rejects budget = 0 (Munich spec requires B ≥ 1)', () => {
     const { mpk } = trustedSetup();
-    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0 }, mpk, accept);
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0 }, mpk, ISSUER.eligibilityKey);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
   });
 
   it('rejects negative budget', () => {
     const { mpk } = trustedSetup();
-    const r = verifyBallot(minimalInputs(), { ...validParams, budget: -1 }, mpk, accept);
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: -1 }, mpk, ISSUER.eligibilityKey);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
   });
 
   it('rejects budget above 0xFFFF', () => {
     const { mpk } = trustedSetup();
-    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0x10000 }, mpk, accept);
+    const r = verifyBallot(minimalInputs(), { ...validParams, budget: 0x10000 }, mpk, ISSUER.eligibilityKey);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/budget.*out of range/);
   });
@@ -366,7 +398,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       minimalInputs(),
       { ...validParams, mode: 'bogus' as unknown as 'exact' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/unknown mode/);
@@ -378,7 +410,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       minimalInputs(),
       { ...validParams, variant: 'C' as unknown as 'A' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/unknown variant/);
@@ -390,7 +422,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       minimalInputs(),
       { numCandidates: 3, budget: 3, mode: 'exact', variant: 'B', d: 1.5 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/Variant B requires a positive integer d/);
@@ -403,7 +435,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
         minimalInputs(),
         { numCandidates: 3, budget: 3, mode: 'exact', variant: 'B', d },
         mpk,
-        accept,
+        ISSUER.eligibilityKey,
       );
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.reason).toMatch(/Variant B requires a positive integer d/);
@@ -417,7 +449,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
         { ...minimalInputs(), electionId: new Uint8Array(len) },
         validParams,
         mpk,
-        accept,
+        ISSUER.eligibilityKey,
       );
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.reason).toMatch(/electionId must be 32 bytes/);
@@ -431,7 +463,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
         { ...minimalInputs(), pseudonym: new Uint8Array(len) },
         validParams,
         mpk,
-        accept,
+        ISSUER.eligibilityKey,
       );
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.reason).toMatch(/pseudonym must be 32 bytes/);
@@ -440,7 +472,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
 
   it('rejects identity mpk (collapses ciphertext privacy)', () => {
     const mpk = G2Point.identity();
-    const r = verifyBallot(minimalInputs(), validParams, mpk, accept);
+    const r = verifyBallot(minimalInputs(), validParams, mpk, ISSUER.eligibilityKey);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/mpk is the identity/);
   });
@@ -462,7 +494,7 @@ describe('verifyBallot — parameter validation (fail-closed on junk inputs)', (
       inputs,
       { numCandidates: 1, budget: 1, mode: 'exact', variant: 'A' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/vk is the identity/);
@@ -486,20 +518,56 @@ describe('verifyBallot — Variant A, exact budget', () => {
       votes: [1n, 1n, 0n], // V = 2 = B
       params,
     });
-    expect(verifyBallot(inputs, params, mpk, accept)).toEqual({ ok: true });
+    expect(verifyBallot(inputs, params, mpk, ISSUER.eligibilityKey)).toEqual({ ok: true });
   });
 
-  it('rejects when wrAttestation verifier rejects', () => {
+  it('rejects a credential no issuer signed', () => {
     const { mpk } = trustedSetup();
-    const { inputs } = buildBallot({
-      mpk,
-      electionId: new Uint8Array(32),
-      pseudonym: new Uint8Array(32),
-      votes: [1n, 1n, 0n],
-      params,
+    const electionId = new Uint8Array(32);
+    const pseudonym = new Uint8Array(32);
+    const { inputs } = buildBallot({ mpk, electionId, pseudonym, votes: [1n, 1n, 0n], params });
+    const forged = forgedCredential({
+      electionId,
+      pseudonym,
+      vk: inputs.attestation.vk,
     });
-    const r = verifyBallot(inputs, params, mpk, reject);
-    expect(r).toEqual({ ok: false, reason: 'wrAttestation verification failed' });
+    const r = verifyBallot({ ...inputs, attestation: forged }, params, mpk, ISSUER.eligibilityKey);
+    expect(r).toEqual({ ok: false, reason: 'attestation verification failed' });
+  });
+
+  // A credential the issuer really did sign, but for someone else's ballot key. The
+  // signature over it is valid, so only the vk equality check catches this.
+  it('rejects a valid credential minted for a different vk', () => {
+    const { mpk } = trustedSetup();
+    const electionId = new Uint8Array(32);
+    const pseudonym = new Uint8Array(32);
+    const { inputs } = buildBallot({ mpk, electionId, pseudonym, votes: [1n, 1n, 0n], params });
+    const otherVk = new Uint8Array(48).fill(0x7c);
+    const elsewhere = ISSUER.mint({ electionId, pseudonym, vk: otherVk });
+    const r = verifyBallot({ ...inputs, attestation: elsewhere }, params, mpk, ISSUER.eligibilityKey);
+    expect(r).toEqual({ ok: false, reason: 'attestation vk does not match the ballot vk' });
+  });
+
+  // The regression this whole change exists to make impossible: under v1 the
+  // credential was outside the signed message, so swapping it left the signature
+  // valid. Now the signature covers it and any swap breaks the signature.
+  it('rejects a swapped credential — the signature covers it now', () => {
+    const { mpk } = trustedSetup();
+    const electionId = new Uint8Array(32);
+    const pseudonym = new Uint8Array(32);
+    const { inputs } = buildBallot({ mpk, electionId, pseudonym, votes: [1n, 1n, 0n], params });
+    // Same voter, same election, but a different weight the issuer also signed.
+    const heavier = ISSUER.mint({
+      electionId,
+      pseudonym,
+      vk: inputs.attestation.vk,
+      weight: 999n,
+    });
+    const r = verifyBallot({ ...inputs, attestation: heavier }, params, mpk, ISSUER.eligibilityKey);
+    // Caught by the *signature*, not by an attestation check: `heavier` is a credential
+    // the issuer genuinely signed, for this voter and this election. Under v1 nothing
+    // would have rejected it.
+    expect(r).toEqual({ ok: false, reason: 'signature invalid' });
   });
 
   it('rejects a flipped byte in a ciphertext', () => {
@@ -522,7 +590,7 @@ describe('verifyBallot — Variant A, exact budget', () => {
       { ...inputs, ciphertexts: tampered },
       params,
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
   });
@@ -537,7 +605,7 @@ describe('verifyBallot — Variant A, exact budget', () => {
       params,
     });
     const { vk: vk2 } = schnorrKeygen();
-    const r = verifyBallot({ ...inputs, vk: vk2.toBytes() }, params, mpk, accept);
+    const r = verifyBallot({ ...inputs, vk: vk2.toBytes() }, params, mpk, ISSUER.eligibilityKey);
     expect(r.ok).toBe(false);
   });
 
@@ -554,7 +622,7 @@ describe('verifyBallot — Variant A, exact budget', () => {
       { ...inputs, electionId: new Uint8Array(32).fill(0x02) },
       params,
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
   });
@@ -573,7 +641,7 @@ describe('verifyBallot — Variant A, exact budget', () => {
       inputs,
       { ...params, budget: 3 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
   });
@@ -591,7 +659,7 @@ describe('verifyBallot — Variant A, exact budget', () => {
       inputs,
       { ...params, numCandidates: 4 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/ciphertexts.length/);
@@ -622,7 +690,7 @@ describe('verifyBallot — Variant A, at-most budget', () => {
         votes,
         params,
       });
-      expect(verifyBallot(inputs, params, mpk, accept)).toEqual({ ok: true });
+      expect(verifyBallot(inputs, params, mpk, ISSUER.eligibilityKey)).toEqual({ ok: true });
     }
   });
 
@@ -635,7 +703,7 @@ describe('verifyBallot — Variant A, at-most budget', () => {
       votes: [1n, 1n, 1n], // V = B
       params: { ...params, mode: 'exact' },
     });
-    const r = verifyBallot(inputs, params, mpk, accept); // ask for atMost
+    const r = verifyBallot(inputs, params, mpk, ISSUER.eligibilityKey); // ask for atMost
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/budget mode/);
   });
@@ -655,7 +723,7 @@ describe('verifyBallot — structural rejections', () => {
       { ...inputs, vk: new Uint8Array(48) }, // all-zero is not a valid compressed G1 point
       { numCandidates: 3, budget: 1, mode: 'atMost', variant: 'A' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/vk decode/);
@@ -674,7 +742,7 @@ describe('verifyBallot — structural rejections', () => {
       inputs,
       { numCandidates: 3, budget: 1, mode: 'atMost', variant: 'B' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/Variant B requires/);
@@ -696,13 +764,14 @@ describe('verifyBallot — structural rejections', () => {
       pseudonym: inputs.pseudonym,
       ciphertexts: inputs.ciphertexts,
       zkProof: inputs.zkProof,
+      attestation: inputs.attestation,
     });
     const forged = schnorrSign(other.sk, other.vk, keccak256(preimage, 'bytes'));
     const r = verifyBallot(
       { ...inputs, voterSignature: encodeSchnorr(forged) },
       { numCandidates: 3, budget: 1, mode: 'atMost', variant: 'A' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/signature/);
@@ -729,7 +798,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       votes: [2n, 1n, 0n], // sum = 3 = B
       params: baseParams,
     });
-    expect(verifyBallot(inputs, baseParams, mpk, accept).ok).toBe(true);
+    expect(verifyBallot(inputs, baseParams, mpk, ISSUER.eligibilityKey).ok).toBe(true);
   });
 
   it('honest ballot verifies (atMost budget)', () => {
@@ -742,7 +811,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       votes: [1n, 1n, 0n], // sum = 2 < B
       params,
     });
-    expect(verifyBallot(inputs, params, mpk, accept).ok).toBe(true);
+    expect(verifyBallot(inputs, params, mpk, ISSUER.eligibilityKey).ok).toBe(true);
   });
 
   it('mismatched d is rejected (exact ⌈log₂(B+1)⌉ required)', () => {
@@ -761,7 +830,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       inputs,
       { ...baseParams, d: 3 },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/d \(3\) must equal/);
@@ -784,7 +853,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       { ...inputs, ciphertexts: tamperedCts },
       baseParams,
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
   });
@@ -802,7 +871,7 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       inputs,
       { ...baseParams, budget: 7, d: 2 }, // spec requires d = 3 for B=7
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/must equal ⌈log₂/);
@@ -821,9 +890,36 @@ describe('verifyBallot — Variant B (binary decomposition)', () => {
       inputs,
       { ...baseParams, mode: 'atMost' },
       mpk,
-      accept,
+      ISSUER.eligibilityKey,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/budget mode/);
+  });
+});
+
+describe('ballot domain separators', () => {
+  /**
+   * Guard against "tidying" the labels into agreement.
+   *
+   * Three strings are in play and only two are versions of each other: the message
+   * the voter signs today (v2), the range/budget proof's Fiat–Shamir domain (never
+   * versioned, and changing it re-challenges every proof), and the superseded message
+   * format kept only so a pre-v2 client is reported as a format mismatch.
+   *
+   * The proof label and the v1 diagnostic were once the same literal, so one string
+   * meant two unrelated things and bumping the apparently-stale "v1" silently
+   * invalidated every proof. That is the mistake this test exists to catch.
+   */
+  it('are three distinct domains', () => {
+    const { message, proofTranscript, supersededMessage } = BALLOT_LABELS;
+    expect(new Set([message, proofTranscript, supersededMessage]).size).toBe(3);
+    // The proof domain must not look like a version of the message, or the next
+    // reader "fixes" it.
+    expect(proofTranscript).toContain('PROOF');
+  });
+
+  it('keeps the superseded label matching what the v1 detection looks for', () => {
+    expect(BALLOT_LABELS.supersededMessage).toBe('SHUTTER-VOTE-BALLOT-v1');
+    expect(BALLOT_LABELS.message).toBe('SHUTTER-VOTE-BALLOT-v2');
   });
 });

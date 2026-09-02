@@ -32,7 +32,8 @@
   "files": [
     "dist",
     "NOTICE",
-    "third_party"
+    "third_party",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"

@@ -38,12 +38,11 @@ export { Transcript } from './voting/transcript';
 export {
   ATTESTATION_LABEL,
   attestationMessage,
-  legacyAttestationMessage,
   signAttestation,
   verifyAttestation,
   verifyAttestationSig,
 } from './voting/attestation';
-export type { Attestation, AttestationScheme } from './voting/attestation';
+export type { Attestation } from './voting/attestation';
 
 // Voter-side proof construction. Verifiers use `verifyBallot` (below); the
 // bare `verifyDLEQ`/`verifyOR`/`verifyBudget*` primitives are internal.
@@ -71,7 +70,6 @@ export type {
   BallotInputs,
   BallotVerifyParams,
   VerifyResult,
-  WRAttestationVerifier,
 } from './voting/verify';
 
 // High-level actor wrappers — collapse multi-step voter and tally
