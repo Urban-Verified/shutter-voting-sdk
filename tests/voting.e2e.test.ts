@@ -30,7 +30,6 @@ import {
 import { simulateDKG } from './lib/dkg';
 import { buildBallot } from '../benchmarks/lib/ballot';
 
-const accept = () => true;
 
 // Bumped: (ℓ=15, B=10) prove+verify per voter ≈ 7s in plain BLS on
 // laptop-class hardware; 10 voters plus aggregation needs 5+ minutes of
@@ -84,14 +83,14 @@ describe('end-to-end HL_ARC (scaled, p=10)', () => {
     const ctByCand: Ciphertext[][] = Array.from({ length: ℓ }, () => []);
     for (let v = 0; v < p; v++) {
       const votes = pickVotes(v);
-      const { inputs } = buildBallot({
+      const { inputs, eligibilityKey } = buildBallot({
         mpk: dkg.mpk,
         electionId,
         pseudonym: new Uint8Array(32).fill(v + 1),
         votes,
         params,
       });
-      const r = verifyBallot(inputs, params, dkg.mpk, accept);
+      const r = verifyBallot(inputs, params, dkg.mpk, eligibilityKey);
       expect(r).toEqual({ ok: true });
 
       // Parse ciphertext bytes back into points via the same path the

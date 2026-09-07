@@ -240,12 +240,22 @@ export function buildBabyStepTable(upperBound: bigint): BabyStepTable {
   const m = ceilSqrt(upperBound + 1n);
   const P2 = G2Point.generator();
   const table = new Map<string, bigint>();
+  // Every `add` allocates a fresh point on the fixed 16 MB WASM heap. Leaving the
+  // superseded accumulator to the FinalizationRegistry does not work here: the loop
+  // allocates faster than GC reclaims, and the build aborts with
+  // "Cannot enlarge memory arrays" somewhere around m = 50,000 (bound 2.5e9) — a
+  // size a real election reaches. Freeing eagerly also drops the per-entry cost
+  // from ~190 us to ~67 us, since the allocator stops hunting for space.
   let acc = G2Point.identity();
   for (let i = 0n; i < m; i++) {
     table.set(pointKey(acc), i);
-    acc = acc.add(P2);
+    const next = acc.add(P2);
+    acc.destroyWasm();
+    acc = next;
   }
+  acc.destroyWasm();
   const giantStep = P2.mul(m);
+  P2.destroyWasm(); // giantStep is a distinct allocation and outlives the generator
   return { upperBound, m, giantStep, table };
 }
 
@@ -261,16 +271,23 @@ export function recoverDiscreteLogWithTable(
   // Check j = 0 directly before entering the loop so τ = O returns 0 cleanly.
   let gamma = tau;
   const jMax = m; // j ranges 0..m, so that j·m + i spans up to m·(m+1) ≥ N+1.
-  for (let j = 0n; j <= jMax; j++) {
-    const key = pointKey(gamma);
-    const i = babySteps.get(key);
-    if (i !== undefined) {
-      const T = j * m + i;
-      if (T <= upperBound) return T;
-      // A hit outside the bound is a tally bug; keep scanning in case of a
-      // wrap, but treat the bound as authoritative.
+  try {
+    for (let j = 0n; j <= jMax; j++) {
+      const key = pointKey(gamma);
+      const i = babySteps.get(key);
+      if (i !== undefined) {
+        const T = j * m + i;
+        if (T <= upperBound) return T;
+        // A hit outside the bound is a tally bug; keep scanning in case of a
+        // wrap, but treat the bound as authoritative.
+      }
+      const next = gamma.sub(giantStep);
+      // `tau` belongs to the caller — only free what this loop allocated.
+      if (gamma !== tau) gamma.destroyWasm();
+      gamma = next;
     }
-    gamma = gamma.sub(giantStep);
+  } finally {
+    if (gamma !== tau) gamma.destroyWasm();
   }
   throw new Error(
     `recoverDiscreteLog: τ not in [0, ${upperBound}]·P₂ — tally sum exceeded the declared bound`,

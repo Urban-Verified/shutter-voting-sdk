@@ -23,7 +23,7 @@
  */
 
 import { G1Point, G2Point } from '../crypto/curve';
-import { DST_FIAT_SHAMIR, hashToScalar } from '../crypto/hash';
+import { concatBytes, DST_FIAT_SHAMIR, hashToScalar } from '../crypto/hash';
 import { scalarToBytes } from '../crypto/field';
 
 const encoder = new TextEncoder();
@@ -83,6 +83,23 @@ export class Transcript {
     );
     this.appendScalar(tag + ':chal', e);
     return e;
+  }
+
+  /**
+   * The raw concatenated transcript bytes: the label followed by every appended
+   * `(u32BE(len(tag)) ‖ tag ‖ u32BE(len(value)) ‖ value)` slice.
+   *
+   * Unlike `challenge`, this neither hashes nor folds anything back — it is a
+   * pure read, so calling it does not disturb a transcript that is also being
+   * used to draw challenges.
+   *
+   * Signature schemes that bind a whole transcript into one signed message
+   * rather than deriving a Fiat–Shamir challenge need this: `ATTESTATION_V1`
+   * signs `keccak256(preimage())`. Mirrors `Transcript.preimage()` in the
+   * Python implementation byte-for-byte.
+   */
+  preimage(): Uint8Array {
+    return concatBytes(this.parts);
   }
 
   private appendRaw(b: Uint8Array): void {

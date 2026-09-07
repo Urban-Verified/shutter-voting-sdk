@@ -5,6 +5,7 @@
  */
 
 import { keccak256 } from 'viem';
+import { testIssuer, type TestIssuer } from '../../tests/lib/credential';
 import {
   BallotInputs,
   BallotValidityProof,
@@ -37,9 +38,20 @@ export function buildBallot(args: {
   pseudonym: Uint8Array;
   votes: bigint[];
   params: BallotVerifyParams;
-}): { inputs: BallotInputs; bvp: BallotValidityProof } {
+  /**
+   * Issuer for the ballot's eligibility credential. Optional so benchmarks and
+   * property tests need not care — one is minted on the fly when omitted, and its
+   * public key comes back so a caller that wants to `verifyBallot` can pass it.
+   */
+  issuer?: TestIssuer;
+}): {
+  inputs: BallotInputs;
+  bvp: BallotValidityProof;
+  eligibilityKey: Uint8Array;
+} {
   const { mpk, electionId, pseudonym, votes, params } = args;
   const { sk, vk } = schnorrKeygen();
+  const issuer = args.issuer ?? testIssuer();
 
   let cts: { c1: G2Point; c2: G2Point }[];
   let rs: bigint[];
@@ -133,11 +145,17 @@ export function buildBallot(args: {
     ct.c1.toBytes(),
     ct.c2.toBytes(),
   ]);
+  const attestation = issuer.mint({
+    electionId,
+    pseudonym,
+    vk: vk.toBytes(),
+  });
   const preimage = canonicalBallotMessage({
     electionId,
     pseudonym,
     ciphertexts: ciphertextBytes,
     zkProof,
+    attestation,
   });
   const sig = schnorrSign(sk, vk, keccak256(preimage, 'bytes'));
 
@@ -149,9 +167,10 @@ export function buildBallot(args: {
       ciphertexts: ciphertextBytes,
       zkProof,
       voterSignature: encodeSchnorr(sig),
-      wrAttestation: new Uint8Array([0x01]),
+      attestation,
     },
     bvp,
+    eligibilityKey: issuer.eligibilityKey,
   };
 }
 

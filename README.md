@@ -19,6 +19,7 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
   - [Schnorr signatures](#schnorr-signatures)
   - [Zero-knowledge proof constructors](#zero-knowledge-proof-constructors)
   - [Ballot validity proofs](#ballot-validity-proofs)
+  - [Eligibility credentials](#eligibility-credentials)
   - [Ballot-level verification](#ballot-level-verification)
   - [Wire codecs](#wire-codecs)
   - [Keyper partial decryption](#keyper-partial-decryption)
@@ -47,7 +48,7 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
 - Contract-struct types or any ABI layer — the consumer owns their `Ballot` / `ElectionConfig` / `DecryptionShare` shapes and destructures them into the primitive-typed inputs the SDK expects.
 - `Voter` / `Keyper` classes or service wrappers. The SDK exposes plain ballot-construction and verification functions; callers compose what they need.
 - Scalar / field arithmetic, hash-to-scalar, and bare Chaum–Pedersen DLEQ primitives. These are implementation details of `encrypt` / `proveOR` / `partialDecrypt` / `verifyBallot`; the SDK is organised around ballot and proof *operations*, not their scalar building blocks.
-- WR-Server attestation verification — you inject a `WRAttestationVerifier` closure into `verifyBallot`.
+- Issuing eligibility credentials in production — the SDK can *mint* one (`signAttestation`) and always *verifies* one, but who is eligible, and for what weight, is your service's decision.
 
 ---
 
@@ -242,9 +243,48 @@ interface BallotValidityProof {
 
 See [Variants A and B](#variants-a-and-b) for when to pick each.
 
+### Eligibility credentials
+
+`ATTESTATION_V1` — a Schnorr-on-G₁ signature by the eligibility issuer over a
+domain-separated transcript of `(electionId, pseudonym, vk, weight, nonce)`. The credential
+is what ties a ballot key to a voting weight, and it travels **inside** the ballot.
+
+```ts
+// Issue (your eligibility service; `k` is for vector reproduction only)
+function signAttestation(
+  eligibilitySk: bigint,
+  eligibilityVk: G1Point,
+  fields: Omit<Attestation, 'signature'>,
+  k?: bigint,
+): Uint8Array;                                         // 80 bytes, R ‖ s
+
+// Verify the signature alone
+function verifyAttestationSig(eligibilityKey: Uint8Array, a: Attestation): boolean;
+
+// Normative check: signature, plus electionId binding and weight >= 1
+function verifyAttestation(
+  eligibilityKey: Uint8Array,
+  a: Attestation,
+  opts: { electionId: Uint8Array },
+): boolean;
+```
+
+Two things worth knowing:
+
+- **`nonce` decides re-votes.** It is monotonic per `(election, pseudonym)` and signed by the
+  issuer, so a replayed older ballot carries a lower nonce and loses to the genuine later one.
+  Because it is inside the ballot's signed message, the voter commits to *which* of their
+  ballots is the latest — nobody assembling the feed gets to choose.
+- **`weight` has no upper bound.** There was a per-election ceiling while voting power was
+  clamped; it constrained nothing once weights were uncapped, because the bound had to be at
+  least the largest legitimate holder. Weights travel in the clear in every ballot, so a
+  forged one is visible to any auditor rather than merely blocked.
+
+---
+
 ### Ballot-level verification
 
-`verifyBallot` is the one-call entry point for Vote Proxy / auditor roles. It decodes the `zkProof`, validates every sub-proof, checks the homomorphic sum against the budget, verifies the Schnorr signature, and invokes a caller-supplied WR-Server attestation verifier.
+`verifyBallot` is the one-call entry point for Vote Proxy / auditor roles. It decodes the `zkProof`, validates every sub-proof, checks the homomorphic sum against the budget, verifies the eligibility credential against the issuer's key, and verifies the voter's Schnorr signature — which since v0.3.0 covers the credential too.
 
 ```ts
 interface BallotInputs {
@@ -254,7 +294,16 @@ interface BallotInputs {
   ciphertexts: ReadonlyArray<readonly [Uint8Array, Uint8Array]>; // each pair = (C1, C2), 96 bytes each
   zkProof:        Uint8Array;                          // encodeBallotValidityProof output
   voterSignature: Uint8Array;                          // encodeSchnorr output (80 bytes)
-  wrAttestation:  Uint8Array;                          // opaque σ_WR — handed to your verifier
+  attestation:    Attestation;                         // the eligibility credential, covered by voterSignature
+}
+
+interface Attestation {
+  electionId: Uint8Array;                              // 32
+  pseudonym:  Uint8Array;                              // 32
+  vk:         Uint8Array;                              // 48 — compressed G₁, must match the ballot's vk
+  weight:     bigint;                                  // voting power, uncapped
+  nonce:      bigint;                                  // monotonic per (election, pseudonym) — the re-vote arbiter
+  signature:  Uint8Array;                              // 80 — the issuer's Schnorr signature
 }
 
 interface BallotVerifyParams {
@@ -265,20 +314,13 @@ interface BallotVerifyParams {
   d?: number;                                          // Variant B only: ⌈log2(B+1)⌉
 }
 
-type WRAttestationVerifier = (
-  electionId: Uint8Array,
-  pseudonym:  Uint8Array,
-  vk:         Uint8Array,
-  attestation: Uint8Array,
-) => boolean;
-
 type VerifyResult = { ok: true } | { ok: false; reason: string };
 
 function verifyBallot(
   inputs: BallotInputs,
   params: BallotVerifyParams,
   mpk: G2Point,
-  verifyWRAttestation: WRAttestationVerifier,
+  eligibilityKey: Uint8Array,                          // 48 — compressed G₁ of the issuer
 ): VerifyResult;
 
 // Canonical Schnorr preimage — use this on both the signer and verifier sides.
@@ -287,6 +329,7 @@ function canonicalBallotMessage(args: {
   pseudonym:  Uint8Array;
   ciphertexts: ReadonlyArray<readonly [Uint8Array, Uint8Array]>;
   zkProof:    Uint8Array;
+  attestation: Attestation;
 }): Uint8Array;
 
 // Shared transcript seeding used by both prover and verifier.
@@ -387,7 +430,8 @@ Both variants are fully wired end-to-end — prover, verifier, codec, and benchm
 - **Don't reconstruct the Schnorr preimage by hand.** Always call `canonicalBallotMessage` on both the signer and verifier side. Any drift silently invalidates every ballot.
 - **Transcript binding is load-bearing.** `seedBallotTranscript` binds `vk`, `electionId`, `mpk`, variant / mode / budget, and every ciphertext. Skipping any of these enables cross-ballot replay.
 - **The SDK never sees your contract structs.** Destructure your own `Ballot` and `ElectionConfig` into the primitive shapes. No contract-struct mirror lives here by design (see D-5 in the dev plan).
-- **WR-Server attestation is out of scope.** Inject a `WRAttestationVerifier` closure — the SDK never tries to guess your attestation scheme.
+- **One voter signature covers the ballot *and* the credential.** The credential is a field of `BallotInputs` and part of `canonicalBallotMessage`, including the issuer's signature bytes — so swapping in a different credential, even one the issuer really signed, invalidates the ballot. Before v0.3.0 the credential sat outside the signed message and consumers had to add a second signature of their own to bind the two.
+- **Eligibility policy is out of scope, verification is not.** The SDK verifies `ATTESTATION_V1` against the issuer's public key; deciding who is eligible and at what weight stays with your service. Earlier versions took a `WRAttestationVerifier` closure instead, which in practice invited a `() => true`.
 
 ---
 

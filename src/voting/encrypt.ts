@@ -17,6 +17,7 @@
  */
 
 import { G2Point } from '../crypto/curve';
+import { msmG2 } from '../crypto/msm';
 import { modQ, randomScalar } from '../crypto/field';
 import { Ciphertext } from './types';
 
@@ -44,6 +45,26 @@ export function addCt(a: Ciphertext, b: Ciphertext): Ciphertext {
 /** Scalar multiplication on a ciphertext: k · Enc(m) = Enc(k·m). */
 export function scalarMulCt(k: bigint, a: Ciphertext): Ciphertext {
   return { c1: a.c1.mul(k), c2: a.c2.mul(k) };
+}
+
+/**
+ * Weighted homomorphic sum: `Σ weightsᵢ · ctsᵢ`, in one pass per component.
+ *
+ * What `scalarMulCt` + `addCt` in a loop computes, but without a scalar
+ * multiplication per ciphertext — see `crypto/msm.ts` for why that matters. The
+ * result is byte-identical to the sequential fold, so this is a drop-in for
+ * recomputing a committee's weighted aggregate, not an approximation of it.
+ *
+ * Returns a freshly allocated pair the caller owns; the inputs are untouched.
+ */
+export function msmCt(
+  weights: readonly bigint[],
+  cts: readonly Ciphertext[]
+): Ciphertext {
+  return {
+    c1: msmG2(weights, cts.map(ct => ct.c1)),
+    c2: msmG2(weights, cts.map(ct => ct.c2))
+  };
 }
 
 /** Homomorphic sum of an arbitrary-length list of ciphertexts. */

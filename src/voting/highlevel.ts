@@ -41,6 +41,7 @@ import {
   proveOR,
 } from './proofs';
 import { schnorrSign } from './schnorr';
+import type { Attestation } from './attestation';
 import { Transcript } from './transcript';
 import type {
   BallotValidityProof,
@@ -81,8 +82,14 @@ export interface BuildBallotArgs {
   votes: bigint[];
   /** Election parameters — must match the verifier's exactly. */
   params: BallotVerifyParams;
-  /** Opaque WR-Server attestation bytes; passed through unchanged. */
-  wrAttestation: Uint8Array;
+  /**
+   * The eligibility credential, already issued and signed by the eligibility service.
+   *
+   * Required, and covered by the voter's signature — which is the point of v2. The
+   * credential must have been minted for this `vk` and `pseudonym`; `verifyBallot`
+   * rejects one that names anything else.
+   */
+  attestation: Attestation;
 }
 
 /**
@@ -117,7 +124,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     vk,
     votes,
     params,
-    wrAttestation,
+    attestation,
   } = args;
 
   if (mpk.isIdentity()) {
@@ -351,6 +358,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     pseudonym,
     ciphertexts: ciphertextBytes,
     zkProof,
+    attestation,
   });
   const sig = schnorrSign(sk, vk, keccak256(preimage, 'bytes'));
   const voterSignature = encodeSchnorr(sig);
@@ -363,7 +371,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     ciphertexts: ciphertextBytes,
     zkProof,
     voterSignature,
-    wrAttestation,
+    attestation,
   };
 }
 
@@ -442,38 +450,59 @@ export interface RecoverTallyArgs {
  * admitted ballots whose homomorphic sum overshoots the declared
  * bound).
  */
-export function recoverTally(args: RecoverTallyArgs): bigint[] {
-  const {
-    ctSums,
-    sharesPerCandidate,
-    threshold,
-    committeePKs,
-    upperBound,
-    transcriptFor,
-  } = args;
+interface DeriveTausArgs {
+  ctSums: readonly Ciphertext[];
+  sharesPerCandidate: readonly (readonly PartialDecryption[])[];
+  threshold: number;
+  committeePKs: readonly G2Point[];
+  transcriptFor: (candidateIndex: number, share: PartialDecryption) => Transcript;
+}
+
+type DeriveTausOutcome =
+  | { ok: true; taus: G2Point[] }
+  | { ok: false; reason: string };
+
+/**
+ * Per-candidate `τ = C2 − σ` from `threshold + 1` DLEQ-verified shares.
+ *
+ * This is the whole trust-bearing part of establishing a tally: every supplied
+ * share is checked against its committee public key and the caller's transcript
+ * before any of them reach the Lagrange combination. `recoverTally` and
+ * `verifyTallyAgainstTotals` both route through here, so a change to share
+ * verification cannot apply to one and not the other — the same reason geg keeps
+ * `_derive_taus` (core/aggregation.py).
+ *
+ * Reasons come back unprefixed so each caller can label them with its own name and
+ * keep its historical error strings intact.
+ *
+ * The returned points are freshly allocated; the caller owns them and must
+ * `destroyWasm()` each one.
+ */
+function deriveTaus(args: DeriveTausArgs): DeriveTausOutcome {
+  const { ctSums, sharesPerCandidate, threshold, committeePKs, transcriptFor } = args;
 
   if (!Number.isInteger(threshold) || threshold < 0) {
-    throw new Error(
-      `recoverTally: threshold (${threshold}) must be a non-negative integer`,
-    );
+    return { ok: false, reason: `threshold (${threshold}) must be a non-negative integer` };
   }
   if (ctSums.length !== sharesPerCandidate.length) {
-    throw new Error(
-      `recoverTally: ctSums.length (${ctSums.length}) != sharesPerCandidate.length (${sharesPerCandidate.length})`,
-    );
+    return {
+      ok: false,
+      reason: `ctSums.length (${ctSums.length}) != sharesPerCandidate.length (${sharesPerCandidate.length})`,
+    };
   }
   const need = threshold + 1;
+  const taus: G2Point[] = [];
 
-  const table = buildBabyStepTable(upperBound);
-  const out: bigint[] = new Array(ctSums.length);
+  const fail = (reason: string): DeriveTausOutcome => {
+    for (const t of taus) t.destroyWasm();
+    return { ok: false, reason };
+  };
 
   for (let j = 0; j < ctSums.length; j++) {
     const ctSum = ctSums[j]!;
     const shares = sharesPerCandidate[j]!;
     if (shares.length < need) {
-      throw new Error(
-        `recoverTally: candidate ${j} has ${shares.length} shares, need at least ${need}`,
-      );
+      return fail(`candidate ${j} has ${shares.length} shares, need at least ${need}`);
     }
 
     // Verify every supplied share — even the ones beyond the threshold
@@ -486,26 +515,153 @@ export function recoverTally(args: RecoverTallyArgs): bigint[] {
         share.keyperIndex < 1 ||
         share.keyperIndex > committeePKs.length
       ) {
-        throw new Error(
-          `recoverTally: candidate ${j} share[${i}] has out-of-range keyperIndex ${share.keyperIndex}`,
+        return fail(
+          `candidate ${j} share[${i}] has out-of-range keyperIndex ${share.keyperIndex}`,
         );
       }
       const committeePK = committeePKs[share.keyperIndex - 1]!;
       const t = transcriptFor(j, share);
       if (!verifyDecryptionShare(ctSum, share, committeePK, t)) {
-        throw new Error(
-          `recoverTally: candidate ${j} share from keyper ${share.keyperIndex} failed verification`,
-        );
+        return fail(`candidate ${j} share from keyper ${share.keyperIndex} failed verification`);
       }
     }
 
     const subset = shares.slice(0, need);
     const alphas = subset.map((s) => BigInt(s.keyperIndex));
-    const tau = combineShares(subset, alphas, ctSum);
-    out[j] = recoverDiscreteLogWithTable(tau, table);
+    taus.push(combineShares(subset, alphas, ctSum));
+  }
+
+  return { ok: true, taus };
+}
+
+export function recoverTally(args: RecoverTallyArgs): bigint[] {
+  const { ctSums, upperBound } = args;
+
+  const derived = deriveTaus(args);
+  if (!derived.ok) throw new Error(`recoverTally: ${derived.reason}`);
+  const { taus } = derived;
+
+  const table = buildBabyStepTable(upperBound);
+  const out: bigint[] = new Array(ctSums.length);
+  try {
+    for (let j = 0; j < ctSums.length; j++) {
+      out[j] = recoverDiscreteLogWithTable(taus[j]!, table);
+    }
+  } finally {
+    for (const tau of taus) tau.destroyWasm();
+    table.giantStep.destroyWasm();
   }
 
   return out;
+}
+
+// ---------- verifyTallyAgainstTotals (auditor wrapper) ----------
+
+export interface VerifyTallyArgs extends DeriveTausArgs {
+  /**
+   * The totals someone already published, as exact integers. Passing a float-derived
+   * value defeats the point: above 2^53 a JS number is no longer the integer the
+   * committee decrypted.
+   */
+  claimedTotals: readonly bigint[];
+  /**
+   * `budget × Σ(admitted weights)` — the same figure `recoverTally` would search
+   * within. Used only to range-check the claimed totals (see below); no table is
+   * built and nothing is searched.
+   */
+  upperBound: bigint;
+  /**
+   * Ballot mode. In `'exact'` every admitted ballot spends its whole budget, so the
+   * totals must sum to `upperBound` identically. Defaults to `'exact'`.
+   */
+  mode?: 'exact' | 'atMost';
+}
+
+export interface VerifyTallyResult {
+  ok: boolean;
+  /** `null` when `ok`; otherwise a `shares:`- or `result:`-prefixed explanation. */
+  reason: string | null;
+}
+
+/**
+ * Verify already-published totals against the aggregate and the decryption shares.
+ *
+ * The auditor's path, and the cheap one: `O(candidates)` scalar multiplications, no
+ * baby-step table, nothing searched. `recoverTally` solves an `O(√upperBound)`
+ * discrete log to learn the same fact — that is the tally aggregator's job, not a
+ * verifier's. Concretely, at bound 1e9 `recoverTally` needs ~5.4 s and a 31,623-entry
+ * table in this WASM build and aborts outright above ~2.5e9; this runs in ~6 ms per
+ * candidate at any bound.
+ *
+ * **Checking is exactly as conclusive as solving.** G₂ has prime order, so
+ * `x ↦ x·P₂` is a bijection: there is exactly one `x` with `x·P₂ = τ`. If a claimed
+ * total satisfies the equality it *is* the plaintext — no error probability, no
+ * retry, and no bound needed to establish it.
+ *
+ * Returns `{ ok, reason }` rather than throwing, mirroring geg's `check_result`, so
+ * a UI can render *why* a tally failed to verify instead of catching an exception.
+ */
+export function verifyTallyAgainstTotals(args: VerifyTallyArgs): VerifyTallyResult {
+  const { ctSums, claimedTotals, upperBound, mode = 'exact' } = args;
+
+  if (claimedTotals.length !== ctSums.length) {
+    return {
+      ok: false,
+      reason: `result: ${claimedTotals.length} totals published for ${ctSums.length} candidates`,
+    };
+  }
+
+  const derived = deriveTaus(args);
+  if (!derived.ok) return { ok: false, reason: `shares: ${derived.reason}` };
+  const { taus } = derived;
+
+  try {
+    const P2 = G2Point.generator();
+    try {
+      for (let j = 0; j < ctSums.length; j++) {
+        const total = claimedTotals[j]!;
+        // Range check first. It closes the one gap in the bijection argument: a
+        // publisher could offer `T + q`, which is the same group element and would
+        // satisfy the equality while being a nonsense 256-bit integer. Without this
+        // the check is sound over Z_q but not over the tallies anyone can read.
+        if (total < 0n || total > upperBound) {
+          return { ok: false, reason: `result: total[${j}] = ${total} outside [0, ${upperBound}]` };
+        }
+        const expected = P2.mul(total);
+        const matches = expected.equals(taus[j]!);
+        expected.destroyWasm();
+        if (!matches) {
+          return {
+            ok: false,
+            reason: `result: total[${j}] = ${total} does not decrypt the aggregate`,
+          };
+        }
+      }
+    } finally {
+      P2.destroyWasm();
+    }
+
+    // Pins the vector as a whole rather than each element alone, and catches a
+    // publisher that decrypted a different admitted set. Free: one addition.
+    let summed = 0n;
+    for (const t of claimedTotals) summed += t;
+    if (mode === 'exact') {
+      if (summed !== upperBound) {
+        return {
+          ok: false,
+          reason:
+            `result: totals sum to ${summed}, not the ${upperBound} that ` +
+            `budget x total admitted weight requires in exact mode`,
+        };
+      }
+    } else if (summed > upperBound) {
+      return { ok: false, reason: `result: totals sum to ${summed}, over the bound ${upperBound}` };
+    }
+
+    return { ok: true, reason: null };
+  } finally {
+    for (const tau of taus) tau.destroyWasm();
+  }
 }
 
 // ---------- helpers ----------

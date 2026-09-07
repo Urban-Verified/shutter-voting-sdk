@@ -181,7 +181,17 @@ export type BallotVector = {
     ciphertexts: Array<{ c1: string; c2: string }>;
     zkProof: string; // hex of encodeBallotValidityProof
     signature: string; // hex of encodeSchnorr
-    wr_attestation: string; // hex bytes (SDK treats as opaque)
+    /** Compressed G1 public key of the eligibility issuer. */
+    eligibility_key: string;
+    /** The credential, covered by `signature` since the v2 ballot message. */
+    attestation: {
+      electionId: string;
+      pseudonym: string;
+      vk: string;
+      weight: number;
+      nonce: number;
+      signature: string;
+    };
   };
   expected: {
     verify: boolean;

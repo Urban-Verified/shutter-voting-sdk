@@ -1,6 +1,6 @@
 {
   "name": "@shutter-network/urban-verified-crypto",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript SDK for client-side encrypted voting on the Shutter Network: linearly homomorphic threshold ElGamal over BLS12-381 with vote-validity and decryption-share zero-knowledge proofs.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -32,7 +32,8 @@
   "files": [
     "dist",
     "NOTICE",
-    "third_party"
+    "third_party",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"
