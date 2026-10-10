@@ -1,8 +1,50 @@
-# Shutter Voting SDK
+# Urban Verified: Shutter Voting SDK
 
-TypeScript SDK for client-side encrypted voting on the Shutter Network. Implements linearly homomorphic threshold ElGamal over BLS12-381 with zero-knowledge proofs of vote validity and correct partial decryption, per the Munich *Personalratswahl* cryptographic protocol specification.
+> **Part of the Urban Verified: Private and Verifiable Online Voting stack.**
+> To understand the full end-to-end architecture, start with the [thresholdELGamal README](https://github.com/Urban-Verified/thresholdELGamal#readme).
+
+TypeScript SDK for client-side encrypted voting on the Shutter Network. Implements linearly homomorphic threshold ElGamal over BLS12-381 with zero-knowledge proofs of vote validity and correct partial decryption, following the Munich *Personalratswahl* cryptographic protocol specification. Published on npm as [`@shutter-network/urban-verified-crypto`](https://www.npmjs.com/package/@shutter-network/urban-verified-crypto).
 
 Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/shutter-sdk); shares the BLST WASM layer.
+
+## Where this fits
+
+The SDK holds the cryptography that has to run in the browser. The voting app uses it to encrypt a ballot and prove it is valid, and the [Voting Dashboard](https://github.com/Urban-Verified/voting-dashboard) uses it to re-check everything published on chain. The Python services in [thresholdELGamal](https://github.com/Urban-Verified/thresholdELGamal) do not call this package; they use `sdk_compat.py`, a Python port that produces and accepts exactly the same bytes.
+
+| Election step | Who uses the SDK | What for |
+|---|---|---|
+| Voter casts a ballot | Voting app (browser) | Encrypt the votes, build the range and budget proofs, sign the ballot (`buildBallot`) |
+| Ballots are counted | Tally aggregator (Python port), dashboard | Check proofs, voter signature and eligibility attestation before a ballot is counted (`verifyBallot`) |
+| Keypers decrypt the total | Keypers (Python port) | Make a decryption share with a DLEQ proof (`partialDecrypt`) |
+| Shares are checked | Tally aggregator (Python port), dashboard | Check each decryption share proof (`verifyDecryptionShare`) |
+| Result is recovered | Anyone re-checking the result | Combine shares and recover or check the counts (`combineShares`, `recoverDiscreteLog`, `verifyTallyAgainstTotals`). |
+
+The eligibility attestation in a ballot is signed by the **Voter Registry Oracle**, the service that confirms a logged-in voter may vote. Its public key is stored on chain as `pkWR`.
+
+### Version used by the Urban Verified stack
+
+The Urban Verified stack runs on **SDK 0.1.2** (`"@shutter-network/urban-verified-crypto": "^0.1.2"`).
+
+This README describes the current architecture on `main`, which is **0.3.0**. The two versions build ballots differently:
+
+| | 0.1.2 (used by the stack) | 0.3.0 (this README) |
+|---|---|---|
+| Eligibility attestation | Opaque `wrAttestation` bytes, checked by a verifier function the caller supplies (`WRAttestationVerifier`) | `attestation` object inside the signed ballot, checked by the SDK against the issuer key |
+| What the attestation signs | `electionId`, `pseudonym`, `vk` | `electionId`, `pseudonym`, `vk`, `weight`, `nonce` (`ATTESTATION_V1`) |
+| Re-votes | Newest valid ballot per pseudonym, by order on chain | Highest signed `nonce` per pseudonym |
+| `verifyBallot` 4th argument | Attestation verifier function | Issuer public key |
+| Ballot signature | Message label `SHUTTER-VOTE-BALLOT-v1` | `SHUTTER-VOTE-BALLOT-v2`; older ballots do not verify |
+| Proof transcript | Seeded with `SHUTTER-VOTE-BALLOT-v1` | Seeded with `SHUTTER-VOTE-BALLOT-PROOF-v1`, so every challenge changes and 0.1.2 proofs do not verify |
+
+To read the API the stack uses, see the [README at v0.1.2](https://github.com/Urban-Verified/shutter-voting-sdk/blob/v0.1.2/README.md) and [docs/actor-usage.md](docs/actor-usage.md). Moving the stack to 0.3.0 means updating the voting app, the Voter Registry Oracle, `sdk_compat.py`, the tally aggregator and the dashboard together; see [CHANGELOG.md](CHANGELOG.md) for the migration.
+
+### Related repositories
+
+| Repository | Role |
+|---|---|
+| [`thresholdELGamal`](https://github.com/Urban-Verified/thresholdELGamal) | Keypers, DKG coordinator, tally aggregator. Entry point for the whole system |
+| [`bulletin-board`](https://github.com/Urban-Verified/bulletin-board) | Smart contracts that store keys, ballots, shares and results |
+| [`voting-dashboard`](https://github.com/Urban-Verified/voting-dashboard) | Public dashboard that re-checks every election in the browser with this SDK |
 
 ---
 
@@ -24,6 +66,7 @@ Forked from [`@shutter-network/shutter-sdk`](https://github.com/shutter-network/
   - [Wire codecs](#wire-codecs)
   - [Keyper partial decryption](#keyper-partial-decryption)
   - [Aggregation & tally recovery](#aggregation--tally-recovery)
+  - [High-level wrappers](#high-level-wrappers)
 - [Variants A and B](#variants-a-and-b)
 - [Security notes](#security-notes)
 - [Testing & building](#testing--building)
@@ -136,6 +179,8 @@ const G1_BYTES = 48;
 const G2_BYTES = 96;
 ```
 
+Both classes also have `static identity()`, `static hashToCurve(msg, dst)`, `sub`, `neg` and `isIdentity`. `destroyWasm()` frees the point's WASM memory. The BLST heap has a fixed size, so long-running callers (for example a page that verifies many ballots) should free points they no longer need.
+
 ### Fiat–Shamir transcript
 
 Merlin-style, length-prefixed, with automatic challenge fold-back — the transcript is the single source of truth for every challenge in every proof.
@@ -147,7 +192,7 @@ class Transcript {
   appendScalar(tag: string, x: bigint): void;
   appendPoint(tag: string, p: G1Point | G2Point): void;
   challenge(tag: string): bigint; // folds the challenge back into the transcript
-  clone(): Transcript;
+  preimage(): Uint8Array;         // the bytes absorbed so far (used for attestation signing)
 }
 ```
 
@@ -168,8 +213,12 @@ interface Ciphertext {
 
 function encrypt(m: bigint, mpk: G2Point, r?: bigint): { ct: Ciphertext; r: bigint };
 function addCt(a: Ciphertext, b: Ciphertext): Ciphertext;
-function scalarMulCt(a: Ciphertext, k: bigint): Ciphertext;
+function scalarMulCt(k: bigint, a: Ciphertext): Ciphertext;
 function sumCts(cts: readonly Ciphertext[]): Ciphertext;
+
+// Weighted sum Σ wᵢ · ctᵢ via multi-scalar multiplication (same result as a sequential fold)
+function msmCt(weights: readonly bigint[], cts: readonly Ciphertext[]): Ciphertext;
+function msmG2(scalars: readonly bigint[], points: readonly G2Point[]): G2Point;
 ```
 
 `r` is optional; omitting it draws a fresh scalar. The returned `r` is the randomness the prover re-uses as the witness for range and budget proofs.
@@ -184,7 +233,7 @@ interface SchnorrSig {
   s: bigint;
 }
 
-function schnorrKeygen(): { sk: bigint; vk: G1Point };
+function schnorrKeygen(sk?: bigint): { sk: bigint; vk: G1Point };  // sk is random if omitted
 function schnorrSign(sk: bigint, vk: G1Point, msg: Uint8Array, k?: bigint): SchnorrSig;
 function schnorrVerify(vk: G1Point, msg: Uint8Array, sig: SchnorrSig): boolean;
 ```
@@ -211,7 +260,7 @@ type BudgetProof =
 ```ts
 interface ORStatement { ct: Ciphertext; mpk: G2Point; candidates: readonly bigint[]; }
 interface ORWitness   { r: bigint; trueIndex: number; }
-interface ORCommitments { w?: bigint; simulated?: ReadonlyArray<{ e: bigint; z: bigint } | undefined>; }
+interface ORCommitments { w?: bigint; simulated?: readonly ({ e: bigint; z: bigint } | null)[]; }
 
 function proveOR(stmt: ORStatement, witness: ORWitness, t: Transcript, commit?: ORCommitments): ORProof;
 ```
@@ -261,7 +310,17 @@ function signAttestation(
 // Verify the signature alone
 function verifyAttestationSig(eligibilityKey: Uint8Array, a: Attestation): boolean;
 
-// Normative check: signature, plus electionId binding and weight >= 1
+// The bytes the issuer signs (domain label ATTESTATION_LABEL = 'SHUTTER-VOTE-ATTEST-v1').
+// Throws if weight or nonce is below 1.
+function attestationMessage(
+  electionId: Uint8Array,
+  pseudonym: Uint8Array,
+  vk: Uint8Array,
+  weight: bigint,
+  nonce: bigint,
+): Uint8Array;
+
+// Normative check: signature, plus electionId binding, weight >= 1 and nonce >= 1
 function verifyAttestation(
   eligibilityKey: Uint8Array,
   a: Attestation,
@@ -271,10 +330,10 @@ function verifyAttestation(
 
 Two things worth knowing:
 
-- **`nonce` decides re-votes.** It is monotonic per `(election, pseudonym)` and signed by the
-  issuer, so a replayed older ballot carries a lower nonce and loses to the genuine later one.
+- **`nonce` orders re-votes.** The issuer should make it increase per `(election, pseudonym)`.
   Because it is inside the ballot's signed message, the voter commits to *which* of their
-  ballots is the latest — nobody assembling the feed gets to choose.
+  ballots is the latest, so a replayed older ballot carries a lower nonce. The SDK only signs
+  and checks the nonce; picking the highest one per pseudonym is the caller's job.
 - **`weight` has no upper bound.** There was a per-election ceiling while voting power was
   clamped; it constrained nothing once weights were uncapped, because the bound had to be at
   least the largest legitimate holder. Weights travel in the clear in every ballot, so a
@@ -408,6 +467,44 @@ function buildBabyStepTable(upperBound: bigint): BabyStepTable;
 function recoverDiscreteLogWithTable(tau: G2Point, table: BabyStepTable): bigint;
 ```
 
+### High-level wrappers
+
+One-call helpers that compose the functions above.
+
+```ts
+// Voter: encrypt, prove, and sign a whole ballot. Returns the BallotInputs verifyBallot expects.
+interface BuildBallotArgs {
+  mpk: G2Point; electionId: Uint8Array; pseudonym: Uint8Array;
+  sk: bigint; vk: G1Point;              // voter's per-ballot Schnorr key pair
+  votes: bigint[];                      // one entry per candidate
+  params: BallotVerifyParams;
+  attestation: Attestation;             // must be issued before building
+}
+function buildBallot(args: BuildBallotArgs): BallotInputs;
+
+// Fields shared by the two tally helpers (DeriveTausArgs is internal; shown here for brevity)
+interface DeriveTausArgs {
+  ctSums: readonly Ciphertext[];                                  // per-candidate sums
+  sharesPerCandidate: readonly (readonly PartialDecryption[])[];  // [candidate][share]
+  threshold: number;                                              // t; uses t+1 shares
+  committeePKs: readonly G2Point[];                               // committeePKs[k-1] = mpk_k
+  transcriptFor: (candidateIndex: number, share: PartialDecryption) => Transcript;
+}
+
+// Tally aggregator: verify every share, combine t+1, and solve BSGS. Throws on a bad share.
+interface RecoverTallyArgs extends DeriveTausArgs { upperBound: bigint; }
+function recoverTally(args: RecoverTallyArgs): bigint[];
+
+// Auditor: check published totals without any discrete-log search (O(candidates)).
+interface VerifyTallyArgs extends DeriveTausArgs {
+  claimedTotals: readonly bigint[];
+  upperBound: bigint;                   // used only to range-check the totals
+  mode?: 'exact' | 'atMost';            // default 'exact': totals must sum to upperBound
+}
+interface VerifyTallyResult { ok: boolean; reason: string | null; }
+function verifyTallyAgainstTotals(args: VerifyTallyArgs): VerifyTallyResult;
+```
+
 ---
 
 ## Variants A and B
@@ -417,9 +514,9 @@ Two range-proof shapes are supported, picked at election-config time:
 | Variant | Per-candidate proof        | Branches | Ballot proof size | When to pick                                                  |
 |---------|----------------------------|----------|-------------------|---------------------------------------------------------------|
 | **A**   | `(B+1)`-branch OR over {0,…,B} | `B+1`    | `ℓ · (B+1)` OR branches | Small budgets `B` (Munich default).                           |
-| **B**   | `d` bit-proofs over {0,1}, where `d = ⌈log2(B+1)⌉` | `2`      | `ℓ · d` OR branches   | Large budgets where `(B+1) > d`, i.e. `B ≥ 3` or so.          |
+| **B**   | `d` bit-proofs over {0,1}, where `d = ⌈log2(B+1)⌉` | `2`      | `2 · ℓ · d` OR branches | Larger budgets, where `2d < B+1` (first at `B = 4`; from `B = 6` on it is always smaller). |
 
-Both variants are fully wired end-to-end — prover, verifier, codec, and benchmarks. `seedBallotTranscript` binds `variant` and (for B) `d` into the transcript so an A-ballot cannot be re-interpreted as a B-ballot at the same parameters.
+Both variants are wired end-to-end in the prover, verifier and codec. `seedBallotTranscript` binds `variant` and (for B) `d` into the transcript so an A-ballot cannot be re-interpreted as a B-ballot at the same parameters.
 
 ---
 
@@ -440,13 +537,14 @@ Both variants are fully wired end-to-end — prover, verifier, codec, and benchm
 ```bash
 npm test              # jest — unit, property-based, end-to-end, + vector re-verify
 npm run bench         # jest w/ --expose-gc over benchmarks/*.bench.ts
-npm run gen-vectors   # regenerate tests/vectors/**/*.json deterministically
+npm run bench:wasm    # WASM-heap stress test: builds and verifies thousands of real ballots
+npm run gen-vectors   # regenerate the per-primitive vectors (see note below)
 npm run build         # tsup + copies blst.wasm into dist/
 ```
 
 **Benchmarks** under [`benchmarks/`](benchmarks/): `primitives.bench.ts`, `ballot-variant-{a,b}.bench.ts`, `decrypt.bench.ts`, `e2e.bench.ts`. The full-scale HL_ARC `p=100` e2e is marked `describe.skip` pending a blst WASM rebuild with `ALLOW_MEMORY_GROWTH` (see inline comment in [benchmarks/e2e.bench.ts](benchmarks/e2e.bench.ts)).
 
-**Cross-impl test vectors** under [`tests/vectors/`](tests/vectors/): JSON per primitive (encrypt, DLEQ, OR, budget, Schnorr, decrypt-share, ballot, tally), consumed by `tests/voting.vectors.test.ts` and intended for an independent re-verifier in another language. Schema in [tests/vectors/_schema.ts](tests/vectors/_schema.ts); generator in [scripts/gen-vectors.ts](scripts/gen-vectors.ts).
+**Cross-impl test vectors** under [`tests/vectors/`](tests/vectors/): JSON per primitive (encrypt, DLEQ, OR, budget, Schnorr, decrypt-share, ballot, tally), consumed by `tests/voting.vectors.test.ts` and intended for an independent re-verifier in another language. Schema in [tests/vectors/_schema.ts](tests/vectors/_schema.ts); generator for the per-primitive vectors in [scripts/gen-vectors.ts](scripts/gen-vectors.ts). The `ballot/` vectors come from a separate Python generator and are copied in by hand (see the comment in `tests/voting.vectors.test.ts`).
 
 ---
 

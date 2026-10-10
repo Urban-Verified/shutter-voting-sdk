@@ -1,5 +1,11 @@
 # Actor Usage Guide
 
+> **Version note:** this guide describes the **0.1.x API** (opaque `wrAttestation` and a
+> caller-supplied `WRAttestationVerifier`), which is the version the Urban Verified stack
+> uses (`^0.1.2`). SDK 0.3.0 moves the eligibility credential inside the signed ballot and
+> changes `buildBallot` and `verifyBallot`; see the [README](../README.md#version-used-by-the-urban-verified-stack)
+> and [CHANGELOG.md](../CHANGELOG.md).
+
 This document maps every actor in the Munich *Personalratswahl* voting flow to
 the **exact SDK functions** they must call and the **exact arguments** they
 must supply. It is a reading of `src/index.ts`: only symbols exported from the
@@ -31,7 +37,7 @@ The five actors covered:
 ## Shared setup
 
 ```ts
-import { initCurves } from '@shutter-network/shutter-voting-sdk';
+import { initCurves } from '@shutter-network/urban-verified-crypto';
 await initCurves();
 ```
 
@@ -91,7 +97,7 @@ Vote Registry. With the high-level wrapper this is **two calls**:
 ### 2.1 Ephemeral keypair + WR registration
 
 ```ts
-import { schnorrKeygen } from '@shutter-network/shutter-voting-sdk';
+import { schnorrKeygen } from '@shutter-network/urban-verified-crypto';
 
 // Fresh ephemeral Schnorr keypair, bound to this ballot only.
 const { sk, vk } = schnorrKeygen();           // sk: bigint, vk: G1Point
@@ -110,7 +116,7 @@ import {
   type BallotInputs,
   type BallotVerifyParams,
   type G2Point,
-} from '@shutter-network/shutter-voting-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 const params: BallotVerifyParams = {
   numCandidates: ℓ,
@@ -185,7 +191,7 @@ import {
   type BallotVerifyParams,
   type WRAttestationVerifier,
   type G2Point,
-} from '@shutter-network/shutter-voting-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 const verifyWR: WRAttestationVerifier = (
   electionId, pseudonym, vk, attestation,
@@ -237,7 +243,7 @@ import {
   Transcript,
   type Ciphertext,
   type G2Point,
-} from '@shutter-network/shutter-voting-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 // Per-candidate inputs — `ctSum_j` is the homomorphic sum over all admitted
 // ballots of that candidate's ciphertext column.
@@ -275,7 +281,7 @@ import {
   type Ciphertext,
   type G2Point,
   type PartialDecryption,
-} from '@shutter-network/shutter-voting-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 // Build a fresh transcript per (candidate, share) call, identically to
 // the keyper's seeding above.
